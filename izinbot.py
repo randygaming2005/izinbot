@@ -2,265 +2,163 @@ import logging
 import os
 import asyncio
 import datetime
-import pytz
-
 from aiohttp import web
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    ChatMemberAdministrator,
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    ApplicationBuilder,
-    ContextTypes,
-    CommandHandler,
-    CallbackQueryHandler,
+    ApplicationBuilder, CommandHandler, CallbackQueryHandler,
+    ContextTypes, Defaults
 )
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-)
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 TOKEN = os.environ.get("TOKEN") or "YOUR_BOT_TOKEN_HERE"
+WEBHOOK_URL_BASE = os.environ.get("WEBHOOK_URL_BASE")
 WEBHOOK_PATH = f"/{TOKEN}"
-WEBHOOK_URL_BASE = os.environ.get("WEBHOOK_URL_BASE")  # ex: https://yourapp.onrender.com
 WEBHOOK_URL = f"{WEBHOOK_URL_BASE}{WEBHOOK_PATH}" if WEBHOOK_URL_BASE else None
-ADMIN_CHAT_ID = int(os.environ.get("ADMIN_CHAT_ID") or 0)  # Optional, for direct messages outside group
 
-timezone = pytz.timezone("Asia/Jakarta")
+# Data
+active_izin = {}  # user_id: {'type': 'jojo', 'expires': datetime, 'message_id': int, 'thread_id': int}
+sebat_users = []  # list of user_ids (max 3)
 
-# --- Global state ---
-active_users = {}  # user_id: job
-user_reasons = {}  # user_id: reason str
-sebat_users = []   # list of dicts {id:int, name:str} untuk batasi 3 user izin sebat
-MAX_SEBAT = 3
-
-# --- Helper Functions ---
-
-async def get_admin_ids(application, chat_id):
-    """Ambil list admin di grup (chat_id)"""
-    admins = []
-    try:
-        members = await application.bot.get_chat_administrators(chat_id)
-        for admin in members:
-            if isinstance(admin, ChatMemberAdministrator):
-                admins.append(admin.user.id)
-            else:
-                admins.append(admin.user.id)
-    except Exception as e:
-        logging.error(f"Error fetching admins: {e}")
-    return admins
-
-def build_izin_keyboard():
+async def start_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [
-            InlineKeyboardButton("izin jojo ya ndan (5 menit)", callback_data="izin_jojo"),
-            InlineKeyboardButton("izin ee ya ndan (10 menit)", callback_data="izin_ee"),
-        ],
-        [
-            InlineKeyboardButton("izin sebat ya ndan (10 menit)", callback_data="izin_sebat"),
-        ],
+        [InlineKeyboardButton("izin jojo ya ndan (5 menit)", callback_data="izin_jojo")],
+        [InlineKeyboardButton("izin ee ya ndan (10 menit)", callback_data="izin_ee")],
+        [InlineKeyboardButton("izin sebat ya ndan (10 menit)", callback_data="izin_sebat")],
     ]
-    return InlineKeyboardMarkup(keyboard)
-
-def build_done_keyboard(user_id):
-    # callback_data "done_<user_id>" supaya bisa validasi siapa yg tekan
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("Done", callback_data=f"done_{user_id}")]]
-    )
-
-# --- Handlers ---
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Halo! Pilih tombol izin di bawah ini untuk izin:\n\n",
-        reply_markup=build_izin_keyboard()
-    )
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("Pilih jenis izin:", reply_markup=reply_markup)
 
 async def handle_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    user = query.from_user
-    chat = query.message.chat
-    thread_id = query.message.message_thread_id  # Bisa None jika bukan topic
 
-    user_id = user.id
-    reason_map = {
-        "izin_jojo": ("jojo", 5),
-        "izin_ee": ("ee", 10),
-        "izin_sebat": ("sebat", 10),
+    user_id = query.from_user.id
+    chat_id = query.message.chat_id
+    thread_id = query.message.message_thread_id
+    username = query.from_user.first_name
+
+    if user_id in active_izin:
+        await query.message.reply_text("⛔ Kamu sudah mengambil izin. Tekan DONE dulu sebelum izin lagi.", message_thread_id=thread_id)
+        return
+
+    izin_type = query.data.split("_")[1]  # jojo, ee, sebat
+    duration = 300 if izin_type == "jojo" else 600
+
+    if izin_type == "sebat":
+        if len(sebat_users) >= 3:
+            names = ", ".join(context.bot.get_chat_member(chat_id, uid).user.first_name for uid in sebat_users)
+            await query.message.reply_text(f"⛔ Silahkan kerjakan dahulu tugasmu dan tunggu {names} kembali.", message_thread_id=thread_id)
+            return
+        sebat_users.append(user_id)
+
+    # Send DONE button
+    done_keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("DONE ✅", callback_data=f"done_{user_id}_{izin_type}")]
+    ])
+    msg = await query.message.reply_text(
+        f"✅ {username} izin {izin_type} selama {duration//60} menit.",
+        reply_markup=done_keyboard,
+        message_thread_id=thread_id
+    )
+
+    expires = datetime.datetime.now() + datetime.timedelta(seconds=duration)
+    active_izin[user_id] = {
+        "type": izin_type,
+        "expires": expires,
+        "message_id": msg.message_id,
+        "chat_id": chat_id,
+        "thread_id": thread_id,
+        "name": username
     }
 
-    data = query.data
-    if data not in reason_map:
-        await query.message.reply_text("❌ Data izin tidak valid.")
-        return
+    context.application.create_task(schedule_reminder(user_id, context))
 
-    reason, minutes = reason_map[data]
+async def schedule_reminder(user_id, context):
+    await asyncio.sleep((active_izin[user_id]['expires'] - datetime.datetime.now()).total_seconds())
 
-    # Cek apakah user sudah izin sebelumnya
-    if user_id in active_users:
-        await query.message.reply_text(
-            "⏳ Kamu masih punya izin aktif, silakan tekan Done dulu sebelum izin lagi.",
-            reply_markup=build_done_keyboard(user_id),
-        )
-        return
+    if user_id in active_izin:
+        izin_info = active_izin[user_id]
+        admins = await context.bot.get_chat_administrators(izin_info['chat_id'])
+        for admin in admins:
+            try:
+                await context.bot.send_message(
+                    admin.user.id,
+                    f"⚠️ {izin_info['name']} belum kembali setelah izin {izin_info['type']}."
+                )
+            except Exception as e:
+                logger.warning(f"Gagal kirim ke admin: {e}")
+        if izin_info['type'] == 'sebat':
+            sebat_users.remove(user_id)
+        del active_izin[user_id]
 
-    # Khusus izin sebat: batasi max 3 user
-    if reason == "sebat":
-        if any(u["id"] == user_id for u in sebat_users):
-            await query.message.reply_text(
-                "⏳ Kamu sudah dalam izin sebat. Tekan Done dulu."
-            )
-            return
-        if len(sebat_users) >= MAX_SEBAT:
-            names = ", ".join([u["name"] for u in sebat_users])
-            await query.message.reply_text(
-                f"🚫 silahkan kerjakan dahulu tugas mu, dan tunggu {names} kembali"
-            )
-            return
-        sebat_users.append({"id": user_id, "name": user.first_name})
-
-    user_reasons[user_id] = reason
-
-    # Kirim pesan balasan di topic/thread yang sama
-    await query.message.reply_text(
-        f"✅ {user.first_name} sudah izin {reason} selama {minutes} menit.\n"
-        f"Silakan tekan tombol Done setelah selesai.",
-        reply_markup=build_done_keyboard(user_id),
-        message_thread_id=thread_id,
-    )
-
-    # Schedule timeout job
-    job = context.job_queue.run_once(
-        reminder_timeout,
-        when=minutes * 60,
-        data={"chat_id": chat.id, "user_id": user_id, "reason": reason, "thread_id": thread_id},
-        name=f"reminder_{user_id}"
-    )
-    active_users[user_id] = job
-
-async def reminder_timeout(context: ContextTypes.DEFAULT_TYPE):
-    data = context.job.data
-    chat_id = data["chat_id"]
-    user_id = data["user_id"]
-    reason = data["reason"]
-    thread_id = data.get("thread_id")
-
-    # Jika user sudah done, job ini seharusnya sudah dihapus
-    if user_id not in active_users:
-        return
-
-    # Hapus state izin user karena timeout
-    active_users.pop(user_id, None)
-    user_reasons.pop(user_id, None)
-    if reason == "sebat":
-        sebat_users[:] = [u for u in sebat_users if u["id"] != user_id]
-
-    # Kirim pesan pribadi ke semua admin grup
-    admins = await get_admin_ids(context.application, chat_id)
-    if not admins:
-        logging.warning("Tidak dapat menemukan admin grup untuk kirim pesan.")
-        return
-
-    user = await context.bot.get_chat_member(chat_id, user_id)
-    user_name = user.user.first_name
-
-    msg = f"{user_name} belum kembali setelah izin {reason}."
-
-    for admin_id in admins:
-        try:
-            await context.bot.send_message(admin_id, msg)
-        except Exception as e:
-            logging.error(f"Gagal kirim pesan ke admin {admin_id}: {e}")
-
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    user = query.from_user
-    data = query.data
 
-    if data.startswith("done_"):
-        user_id_done = int(data.split("_")[1])
-        if user.id != user_id_done:
-            await query.message.reply_text("❌ Tombol Done ini bukan untukmu!")
-            return
+    data_parts = query.data.split("_")
+    if len(data_parts) < 3:
+        return
 
-        if user.id not in active_users:
-            await query.message.reply_text("🚫 Kamu belum izin apapun.")
-            return
+    done_user_id = int(data_parts[1])
+    izin_type = data_parts[2]
+    from_user_id = query.from_user.id
 
-        # Hapus job
-        job = active_users.pop(user.id)
-        job.schedule_removal()
-        reason = user_reasons.pop(user.id, None)
-        if reason == "sebat":
-            sebat_users[:] = [u for u in sebat_users if u["id"] != user.id]
+    if from_user_id != done_user_id:
+        await query.message.reply_text("⛔ Hanya yang mengambil izin yang bisa menekan DONE.", message_thread_id=query.message.message_thread_id)
+        return
 
-        await query.message.reply_text(
-            f"✅ {user.first_name} sudah selesai izin {reason}."
-        )
-    else:
-        await query.message.reply_text("❌ Callback tidak dikenali.")
+    if from_user_id in active_izin:
+        if izin_type == "sebat" and from_user_id in sebat_users:
+            sebat_users.remove(from_user_id)
+        del active_izin[from_user_id]
+        await query.message.reply_text("✅ Welcome back! Izin kamu sudah dicatat selesai.", message_thread_id=query.message.message_thread_id)
 
-# --- Webhook and webserver ---
-
-async def handle_root(request):
-    return web.Response(text="Bot is running")
-
-async def handle_webhook(request):
-    app = request.app["application"]
-    update = await request.json()
-    from telegram import Update as TgUpdate
-    tg_update = TgUpdate.de_json(update, app.bot)
-    await app.update_queue.put(tg_update)
-    return web.Response()
-
-async def start_jobqueue(app):
-    await app.job_queue.start()
-    logging.info("✅ JobQueue started.")
+async def test_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    update.message.text = '/StartIzin'
+    await start_izin(update, context)
 
 async def main():
     application = (
         ApplicationBuilder()
         .token(TOKEN)
+        .defaults(Defaults(parse_mode="HTML"))
         .build()
     )
 
-    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("StartIzin", start_izin))
+    application.add_handler(CommandHandler("test", test_izin))
     application.add_handler(CallbackQueryHandler(handle_izin, pattern="^izin_"))
-    application.add_handler(CallbackQueryHandler(button_callback, pattern="^done_"))
+    application.add_handler(CallbackQueryHandler(handle_done, pattern="^done_"))
 
-    application.add_error_handler(lambda update, context: logging.error(f"Error: {context.error}"))
+    async def webhook_handler(request):
+        update = await request.json()
+        await application.update_queue.put(Update.de_json(update, application.bot))
+        return web.Response()
 
-    # aiohttp server for webhook and healthcheck
+    async def handle_root(request):
+        return web.Response(text="Bot is running")
+
     app = web.Application()
-    app["application"] = application
     app.add_routes([
         web.get("/", handle_root),
-        web.post(WEBHOOK_PATH, handle_webhook),
+        web.post(WEBHOOK_PATH, webhook_handler),
     ])
-
-    if WEBHOOK_URL:
-        await application.bot.set_webhook(WEBHOOK_URL)
-        logging.info(f"🌐 Webhook set to {WEBHOOK_URL}")
-    else:
-        logging.warning("⚠️ WEBHOOK_URL_BASE env not set, webhook disabled!")
 
     runner = web.AppRunner(app)
     await runner.setup()
-    port = int(os.environ.get("PORT", 8000))
-    site = web.TCPSite(runner, "0.0.0.0", port)
+    site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", 8000)))
     await site.start()
-    logging.info(f"🌐 Webserver started on port {port}")
+
+    if WEBHOOK_URL:
+        await application.bot.set_webhook(WEBHOOK_URL)
+        logger.info(f"Webhook set to {WEBHOOK_URL}")
 
     await application.initialize()
     await application.start()
-    await start_jobqueue(application)
-
-    # Keep running
+    logger.info("Bot started")
     while True:
         await asyncio.sleep(3600)
 
