@@ -25,19 +25,16 @@ logging.basicConfig(
 
 TOKEN = os.environ.get("TOKEN") or "YOUR_BOT_TOKEN_HERE"
 WEBHOOK_PATH = f"/{TOKEN}"
-WEBHOOK_URL_BASE = os.environ.get("WEBHOOK_URL_BASE")  # ex: https://yourapp.onrender.com
+WEBHOOK_URL_BASE = os.environ.get("WEBHOOK_URL_BASE")
 WEBHOOK_URL = f"{WEBHOOK_URL_BASE}{WEBHOOK_PATH}" if WEBHOOK_URL_BASE else None
-ADMIN_CHAT_ID = int(os.environ.get("ADMIN_CHAT_ID") or 0)  # Optional, for direct messages outside group
+ADMIN_CHAT_ID = int(os.environ.get("ADMIN_CHAT_ID") or 0)
 
 timezone = pytz.timezone("Asia/Jakarta")
 
-# --- Global state ---
-active_users = {}  # user_id: job
-user_reasons = {}  # user_id: reason str
-sebat_users = []   # list of dicts {id:int, name:str}
+active_users = {}
+user_reasons = {}
+sebat_users = []
 MAX_SEBAT = 3
-
-# --- Helper Functions ---
 
 async def get_admin_ids(application, chat_id):
     admins = []
@@ -52,12 +49,9 @@ async def get_admin_ids(application, chat_id):
 def build_izin_keyboard():
     keyboard = [
         [
-            InlineKeyboardButton("izin jojo ya ndan (5 menit)", callback_data="izin_jojo"),
-            InlineKeyboardButton("izin ee ya ndan (10 menit)", callback_data="izin_ee"),
-        ],
-        [
+            InlineKeyboardButton("izin toilet ya ndan (5 menit)", callback_data="izin_toilet"),
             InlineKeyboardButton("izin sebat ya ndan (10 menit)", callback_data="izin_sebat"),
-        ],
+        ]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -66,40 +60,11 @@ def build_done_keyboard(user_id):
         [[InlineKeyboardButton("Done", callback_data=f"done_{user_id}")]]
     )
 
-# --- Command Handlers ---
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def startizin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Halo! Pilih tombol izin di bawah ini untuk izin:\n\n",
         reply_markup=build_izin_keyboard()
     )
-
-async def list_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not active_users:
-        await update.message.reply_text("✅ Tidak ada yang sedang izin saat ini.")
-        return
-
-    now = datetime.datetime.now(tz=timezone)
-    lines = ["📋 *Daftar Izin Aktif:*\n"]
-    for user_id, job in active_users.items():
-        try:
-            member = await context.bot.get_chat_member(update.effective_chat.id, user_id)
-            name = member.user.first_name
-        except Exception as e:
-            logging.error(f"Gagal mengambil nama user {user_id}: {e}")
-            name = f"User {user_id}"
-
-        reason = user_reasons.get(user_id, "tidak diketahui")
-        remaining = job.next_t - now
-        minutes, seconds = divmod(int(remaining.total_seconds()), 60)
-        time_left = f"{minutes}m {seconds}s"
-
-        lines.append(f"• *{name}* — `{reason}` ({time_left} tersisa)")
-
-    message = "\n".join(lines)
-    await update.message.reply_text(message, parse_mode="Markdown")
-
-# --- Callback Handlers ---
 
 async def handle_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -110,8 +75,7 @@ async def handle_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = user.id
     reason_map = {
-        "izin_jojo": ("jojo", 5),
-        "izin_ee": ("ee", 10),
+        "izin_toilet": ("toilet", 5),
         "izin_sebat": ("sebat", 10),
     }
 
@@ -131,9 +95,7 @@ async def handle_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if reason == "sebat":
         if any(u["id"] == user_id for u in sebat_users):
-            await query.message.reply_text(
-                "⏳ Kamu sudah dalam izin sebat. Tekan Done dulu."
-            )
+            await query.message.reply_text("⏳ Kamu sudah dalam izin sebat. Tekan Done dulu.")
             return
         if len(sebat_users) >= MAX_SEBAT:
             names = ", ".join([u["name"] for u in sebat_users])
@@ -182,6 +144,7 @@ async def reminder_timeout(context: ContextTypes.DEFAULT_TYPE):
 
     user = await context.bot.get_chat_member(chat_id, user_id)
     user_name = user.user.first_name
+
     msg = f"{user_name} belum kembali setelah izin {reason}."
 
     for admin_id in admins:
@@ -218,7 +181,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await query.message.reply_text("❌ Callback tidak dikenali.")
 
-# --- Webhook Setup ---
+async def list_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not active_users:
+        await update.message.reply_text("✅ Tidak ada pengguna yang sedang izin saat ini.")
+        return
+
+    lines = ["📋 Daftar pengguna yang sedang izin:"]
+    for user_id, job in active_users.items():
+        reason = user_reasons.get(user_id, "tidak diketahui")
+        time_left = job.next_t - datetime.datetime.now(tz=timezone)
+        minutes = int(time_left.total_seconds() // 60)
+        seconds = int(time_left.total_seconds() % 60)
+        user = await context.bot.get_chat_member(update.effective_chat.id, user_id)
+        lines.append(f"- {user.user.first_name} ({reason}, sisa {minutes}m {seconds}s)")
+
+    await update.message.reply_text("\n".join(lines))
 
 async def handle_root(request):
     return web.Response(text="Bot is running")
@@ -242,9 +219,8 @@ async def main():
         .build()
     )
 
-    # Ganti command /start jadi /startizin
-    application.add_handler(CommandHandler("startizin", start))
-    application.add_handler(CommandHandler("ListIzin", list_izin))
+    application.add_handler(CommandHandler("startizin", startizin))
+    application.add_handler(CommandHandler("listizin", list_izin))
     application.add_handler(CallbackQueryHandler(handle_izin, pattern="^izin_"))
     application.add_handler(CallbackQueryHandler(button_callback, pattern="^done_"))
     application.add_error_handler(lambda update, context: logging.error(f"Error: {context.error}"))
