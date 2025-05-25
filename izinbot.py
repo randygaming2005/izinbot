@@ -1,164 +1,167 @@
-import os
-import asyncio
 import logging
-from aiohttp import web
+import os
+import datetime
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
-    CommandHandler,
     CallbackQueryHandler,
+    CommandHandler,
     ContextTypes,
-    PicklePersistence,
 )
+from aiohttp import web
 
 logging.basicConfig(level=logging.INFO)
 
-TOKEN = os.environ.get("TOKEN", "YOUR_BOT_TOKEN_HERE")
+TOKEN = os.environ.get("TOKEN")
+WEBHOOK_URL_BASE = os.environ.get("WEBHOOK_URL_BASE")  # ex: https://yourbot.onrender.com
 WEBHOOK_PATH = f"/{TOKEN}"
-WEBHOOK_URL_BASE = os.environ.get("WEBHOOK_URL_BASE")
-WEBHOOK_URL = f"{WEBHOOK_URL_BASE}{WEBHOOK_PATH}" if WEBHOOK_URL_BASE else None
-persistence = PicklePersistence(filepath="reminder_data.pkl")
+WEBHOOK_URL = f"{WEBHOOK_URL_BASE}{WEBHOOK_PATH}"
 
+# === Command Start ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Halo! Gunakan /izin di grup untuk minta izin.")
-
-async def izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("izin jojo ya ndan (5 menit)", callback_data="izin_jojo_5")],
-        [InlineKeyboardButton("izin ee ya ndan (10 menit)", callback_data="izin_ee_10")],
-        [InlineKeyboardButton("izin sebat ya ndan (10 menit)", callback_data="izin_sebat_10")],
+        [
+            InlineKeyboardButton("🕔 Izin Jojo (5 menit)", callback_data="izin_5_jojo"),
+            InlineKeyboardButton("🕙 Izin Ee (10 menit)", callback_data="izin_10_ee"),
+        ],
+        [
+            InlineKeyboardButton("🚬 Izin Sebat (10 menit)", callback_data="izin_10_sebat")
+        ]
     ]
-    await update.message.reply_text("Pilih jenis izin:", reply_markup=InlineKeyboardMarkup(keyboard))
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("Pilih izin:", reply_markup=reply_markup)
 
-async def handle_izin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# === Handle tombol izin ===
+async def handle_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    user = query.from_user
-    chat = update.effective_chat
+    data = query.data
 
-    reason_map = {
-        "izin_jojo_5": ("jojo", 5),
-        "izin_ee_10": ("ee", 10),
-        "izin_sebat_10": ("sebat", 10),
+    parts = data.split("_")
+    if len(parts) != 3:
+        return
+
+    menit = int(parts[1])
+    nama = parts[2]
+    user = query.from_user
+    chat_id = query.message.chat_id
+    message_id = query.message.message_id
+
+    # Kirim tombol Done
+    done_keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Done", callback_data=f"done_{user.id}_{nama}")]
+    ])
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"{user.full_name} minta izin {nama} selama {menit} menit.",
+        reply_markup=done_keyboard
+    )
+
+    # Simpan status izin di context
+    context.chat_data[f"izin_{user.id}"] = {
+        "time": datetime.datetime.utcnow(),
+        "duration": menit,
+        "done": False,
+        "user": user,
+        "nama": nama,
+        "chat_id": chat_id,
     }
 
-    reason, minutes = reason_map[query.data]
+    # Jalankan timer
+    asyncio.create_task(timer_check(user.id, context))
 
-    # Simpan status izin aktif user
-    context.user_data["izin_active"] = True
-
-    # Kirim pesan dengan tombol Done
-    done_keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Done", callback_data="done_pressed")]
-    ])
-    await query.edit_message_text(
-        f"✅ Izin *{reason}* diterima. Waktu: *{minutes} menit*.\n"
-        "Silakan tekan *Done* jika sudah kembali.",
-        reply_markup=done_keyboard,
-        parse_mode="Markdown"
-    )
-
-    # Ambil semua admin non-bot di grup
-    admins = await context.bot.get_chat_administrators(chat.id)
-    admin_ids = [admin.user.id for admin in admins if not admin.user.is_bot]
-
-    # Simpan admin list untuk job nanti
-    context.chat_data["admin_ids"] = admin_ids
-    context.chat_data["user_name"] = user.full_name
-    context.chat_data["user_id"] = user.id
-
-    # Jadwalkan job cek izin
-    context.job_queue.run_once(
-        notify_admin_if_not_done,
-        when=minutes * 60,
-        chat_id=user.id,
-        name=f"izin_{user.id}",
-        data={"user_id": user.id, "user_name": user.full_name, "admin_ids": admin_ids}
-    )
-
-async def handle_done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# === Handle tombol Done ===
+async def handle_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    context.user_data["izin_active"] = False
-    await query.edit_message_text("✅ Selamat datang kembali! Status izin selesai.")
+    data = query.data
 
-async def notify_admin_if_not_done(context: ContextTypes.DEFAULT_TYPE):
-    data = context.job.data
-    user_id = data["user_id"]
-    user_name = data["user_name"]
-    admin_ids = data["admin_ids"]
+    _, user_id, nama = data.split("_")
+    user_id = int(user_id)
+    izin_data = context.chat_data.get(f"izin_{user_id}")
 
-    # Cek user status izin
-    # Kalau kamu pakai persistence, cek disini, atau bisa pakai user_data (tapi harus diingat user_data biasanya per update session)
-    # Di sini pakai aplikasi chat_data sebagai contoh
-    user_status = context.application.user_data.get(user_id, {})
-    izin_active = user_status.get("izin_active", True)  # Default True untuk aman
+    if izin_data:
+        izin_data["done"] = True
+        await query.edit_message_text(text=f"{query.from_user.full_name} telah kembali dari {nama}.")
+    else:
+        await query.edit_message_text(text="⏱️ Izin tidak ditemukan atau sudah selesai.")
 
-    if izin_active:
-        for admin_id in admin_ids:
-            try:
-                await context.bot.send_message(
-                    chat_id=admin_id,
-                    text=f"⚠️ {user_name} belum kembali dari izin!"
-                )
-            except Exception as e:
-                logging.error(f"Gagal kirim pesan ke admin {admin_id}: {e}")
+# === Timer: kirim ke admin jika belum done ===
+async def timer_check(user_id: int, context: ContextTypes.DEFAULT_TYPE):
+    await asyncio.sleep(5)  # Delay sedikit untuk jaga stabilitas
 
+    izin_key = f"izin_{user_id}"
+    izin = context.chat_data.get(izin_key)
+    if not izin:
+        return
+
+    await asyncio.sleep(izin["duration"] * 60)  # Tunggu selama izin
+
+    if not izin["done"]:
+        try:
+            admins = await context.bot.get_chat_administrators(izin["chat_id"])
+            for admin in admins:
+                if not admin.user.is_bot:
+                    try:
+                        await context.bot.send_message(
+                            chat_id=admin.user.id,
+                            text=(
+                                f"⚠️ {izin['user'].full_name} belum menekan Done setelah izin {izin['nama']} "
+                                f"{izin['duration']} menit lalu di grup {izin['chat_id']}"
+                            )
+                        )
+                    except Exception as e:
+                        logging.warning(f"Gagal kirim ke admin {admin.user.full_name}: {e}")
+        except Exception as e:
+            logging.error(f"Gagal mengambil admin grup: {e}")
+
+    context.chat_data.pop(izin_key, None)
+
+# === Error Handler ===
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logging.error("Exception:", exc_info=context.error)
+    logging.error("Error:", exc_info=context.error)
 
-async def handle_root(request):
-    return web.Response(text="Bot is running")
-
+# === Webhook Setup ===
 async def handle_webhook(request):
     app = request.app["application"]
-    update = await request.json()
-    from telegram import Update as TgUpdate
-    tg_update = TgUpdate.de_json(update, app.bot)
-    await app.update_queue.put(tg_update)
+    data = await request.json()
+    update = Update.de_json(data, app.bot)
+    await app.update_queue.put(update)
     return web.Response()
 
-async def start_jobqueue(app):
-    await app.job_queue.start()
+async def handle_root(request):
+    return web.Response(text="Bot aktif!")
 
-async def main():
-    application = (
-        ApplicationBuilder()
-        .token(TOKEN)
-        .persistence(persistence)
-        .post_init(start_jobqueue)
-        .build()
-    )
+async def start_bot():
+    app = ApplicationBuilder().token(TOKEN).build()
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("izin", izin))
-    application.add_handler(CallbackQueryHandler(handle_izin_callback, pattern="^izin_"))
-    application.add_handler(CallbackQueryHandler(handle_done_callback, pattern="^done_pressed$"))
-    application.add_error_handler(error_handler)
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(handle_izin, pattern=r"^izin_\d+_.+"))
+    app.add_handler(CallbackQueryHandler(handle_done, pattern=r"^done_\d+_.+"))
+    app.add_error_handler(error_handler)
 
-    app = web.Application()
-    app["application"] = application
-    app.add_routes([
-        web.get("/", handle_root),
-        web.post(WEBHOOK_PATH, handle_webhook),
-    ])
+    web_app = web.Application()
+    web_app["application"] = app
+    web_app.router.add_post(WEBHOOK_PATH, handle_webhook)
+    web_app.router.add_get("/", handle_root)
+
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", 8000)))
+    await site.start()
 
     if WEBHOOK_URL:
-        await application.bot.set_webhook(WEBHOOK_URL)
-        logging.info(f"Webhook set to {WEBHOOK_URL}")
+        await app.bot.set_webhook(WEBHOOK_URL)
+        logging.info(f"Webhook set: {WEBHOOK_URL}")
+    else:
+        logging.warning("WEBHOOK_URL not set, bot will not receive updates!")
 
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.environ.get("PORT", 8000))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    logging.info(f"Server running on port {port}")
-
-    await application.initialize()
-    await application.start()
+    await app.initialize()
+    await app.start()
 
     while True:
         await asyncio.sleep(3600)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(start_bot())
