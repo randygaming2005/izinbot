@@ -34,21 +34,17 @@ timezone = pytz.timezone("Asia/Jakarta")
 # --- Global state ---
 active_users = {}  # user_id: job
 user_reasons = {}  # user_id: reason str
-sebat_users = []   # list of dicts {id:int, name:str} untuk batasi 3 user izin sebat
+sebat_users = []   # list of dicts {id:int, name:str}
 MAX_SEBAT = 3
 
 # --- Helper Functions ---
 
 async def get_admin_ids(application, chat_id):
-    """Ambil list admin di grup (chat_id)"""
     admins = []
     try:
         members = await application.bot.get_chat_administrators(chat_id)
         for admin in members:
-            if isinstance(admin, ChatMemberAdministrator):
-                admins.append(admin.user.id)
-            else:
-                admins.append(admin.user.id)
+            admins.append(admin.user.id)
     except Exception as e:
         logging.error(f"Error fetching admins: {e}")
     return admins
@@ -66,12 +62,11 @@ def build_izin_keyboard():
     return InlineKeyboardMarkup(keyboard)
 
 def build_done_keyboard(user_id):
-    # callback_data "done_<user_id>" supaya bisa validasi siapa yg tekan
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton("Done", callback_data=f"done_{user_id}")]]
     )
 
-# --- Handlers ---
+# --- Command Handlers ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -79,12 +74,39 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=build_izin_keyboard()
     )
 
+async def list_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not active_users:
+        await update.message.reply_text("✅ Tidak ada yang sedang izin saat ini.")
+        return
+
+    now = datetime.datetime.now(tz=timezone)
+    lines = ["📋 *Daftar Izin Aktif:*\n"]
+    for user_id, job in active_users.items():
+        try:
+            member = await context.bot.get_chat_member(update.effective_chat.id, user_id)
+            name = member.user.first_name
+        except Exception as e:
+            logging.error(f"Gagal mengambil nama user {user_id}: {e}")
+            name = f"User {user_id}"
+
+        reason = user_reasons.get(user_id, "tidak diketahui")
+        remaining = job.next_t - now
+        minutes, seconds = divmod(int(remaining.total_seconds()), 60)
+        time_left = f"{minutes}m {seconds}s"
+
+        lines.append(f"• *{name}* — `{reason}` ({time_left} tersisa)")
+
+    message = "\n".join(lines)
+    await update.message.reply_text(message, parse_mode="Markdown")
+
+# --- Callback Handlers ---
+
 async def handle_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user = query.from_user
     chat = query.message.chat
-    thread_id = query.message.message_thread_id  # Bisa None jika bukan topic
+    thread_id = query.message.message_thread_id
 
     user_id = user.id
     reason_map = {
@@ -100,7 +122,6 @@ async def handle_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     reason, minutes = reason_map[data]
 
-    # Cek apakah user sudah izin sebelumnya
     if user_id in active_users:
         await query.message.reply_text(
             "⏳ Kamu masih punya izin aktif, silakan tekan Done dulu sebelum izin lagi.",
@@ -108,7 +129,6 @@ async def handle_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Khusus izin sebat: batasi max 3 user
     if reason == "sebat":
         if any(u["id"] == user_id for u in sebat_users):
             await query.message.reply_text(
@@ -125,7 +145,6 @@ async def handle_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_reasons[user_id] = reason
 
-    # Kirim pesan balasan di topic/thread yang sama
     await query.message.reply_text(
         f"✅ {user.first_name} sudah izin {reason} selama {minutes} menit.\n"
         f"Silakan tekan tombol Done setelah selesai.",
@@ -133,7 +152,6 @@ async def handle_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message_thread_id=thread_id,
     )
 
-    # Schedule timeout job
     job = context.job_queue.run_once(
         reminder_timeout,
         when=minutes * 60,
@@ -149,17 +167,14 @@ async def reminder_timeout(context: ContextTypes.DEFAULT_TYPE):
     reason = data["reason"]
     thread_id = data.get("thread_id")
 
-    # Jika user sudah done, job ini seharusnya sudah dihapus
     if user_id not in active_users:
         return
 
-    # Hapus state izin user karena timeout
     active_users.pop(user_id, None)
     user_reasons.pop(user_id, None)
     if reason == "sebat":
         sebat_users[:] = [u for u in sebat_users if u["id"] != user_id]
 
-    # Kirim pesan pribadi ke semua admin grup
     admins = await get_admin_ids(context.application, chat_id)
     if not admins:
         logging.warning("Tidak dapat menemukan admin grup untuk kirim pesan.")
@@ -167,7 +182,6 @@ async def reminder_timeout(context: ContextTypes.DEFAULT_TYPE):
 
     user = await context.bot.get_chat_member(chat_id, user_id)
     user_name = user.user.first_name
-
     msg = f"{user_name} belum kembali setelah izin {reason}."
 
     for admin_id in admins:
@@ -192,7 +206,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("🚫 Kamu belum izin apapun.")
             return
 
-        # Hapus job
         job = active_users.pop(user.id)
         job.schedule_removal()
         reason = user_reasons.pop(user.id, None)
@@ -205,7 +218,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await query.message.reply_text("❌ Callback tidak dikenali.")
 
-# --- Webhook and webserver ---
+# --- Webhook Setup ---
 
 async def handle_root(request):
     return web.Response(text="Bot is running")
@@ -229,13 +242,12 @@ async def main():
         .build()
     )
 
-    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("StartIzin", StartIzin))
+    application.add_handler(CommandHandler("ListIzin", list_izin))
     application.add_handler(CallbackQueryHandler(handle_izin, pattern="^izin_"))
     application.add_handler(CallbackQueryHandler(button_callback, pattern="^done_"))
-
     application.add_error_handler(lambda update, context: logging.error(f"Error: {context.error}"))
 
-    # aiohttp server for webhook and healthcheck
     app = web.Application()
     app["application"] = application
     app.add_routes([
@@ -260,7 +272,6 @@ async def main():
     await application.start()
     await start_jobqueue(application)
 
-    # Keep running
     while True:
         await asyncio.sleep(3600)
 
