@@ -1,7 +1,7 @@
 import logging
 import os
-import datetime
 import asyncio
+import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -14,12 +14,13 @@ from aiohttp import web
 logging.basicConfig(level=logging.INFO)
 
 TOKEN = os.environ.get("TOKEN")
-WEBHOOK_URL_BASE = os.environ.get("WEBHOOK_URL_BASE")  # ex: https://yourbot.onrender.com
+WEBHOOK_URL_BASE = os.environ.get("WEBHOOK_URL_BASE")  # Contoh: https://yourbot.onrender.com
 WEBHOOK_PATH = f"/{TOKEN}"
 WEBHOOK_URL = f"{WEBHOOK_URL_BASE}{WEBHOOK_PATH}"
 
 # === Command Start ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    thread_id = update.message.message_thread_id
     keyboard = [
         [
             InlineKeyboardButton("🕔 Izin Jojo (5 menit)", callback_data="izin_5_jojo"),
@@ -30,7 +31,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Pilih izin:", reply_markup=reply_markup)
+    await update.message.reply_text("Pilih izin:", reply_markup=reply_markup, message_thread_id=thread_id)
 
 # === Handle tombol izin ===
 async def handle_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -46,7 +47,7 @@ async def handle_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     nama = parts[2]
     user = query.from_user
     chat_id = query.message.chat_id
-    message_id = query.message.message_id
+    thread_id = query.message.message_thread_id
 
     # Kirim tombol Done
     done_keyboard = InlineKeyboardMarkup([
@@ -55,7 +56,8 @@ async def handle_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(
         chat_id=chat_id,
         text=f"{user.full_name} minta izin {nama} selama {menit} menit.",
-        reply_markup=done_keyboard
+        reply_markup=done_keyboard,
+        message_thread_id=thread_id
     )
 
     # Simpan status izin di context
@@ -66,6 +68,7 @@ async def handle_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "user": user,
         "nama": nama,
         "chat_id": chat_id,
+        "thread_id": thread_id,
     }
 
     # Jalankan timer
