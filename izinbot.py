@@ -242,7 +242,8 @@ async def main():
         .build()
     )
 
-    application.add_handler(CommandHandler("StartIzin", StartIzin))
+    # Ganti command /start jadi /startizin
+    application.add_handler(CommandHandler("startizin", start))
     application.add_handler(CommandHandler("ListIzin", list_izin))
     application.add_handler(CallbackQueryHandler(handle_izin, pattern="^izin_"))
     application.add_handler(CallbackQueryHandler(button_callback, pattern="^done_"))
