@@ -199,7 +199,7 @@ async def main():
     application.add_handler(CommandHandler("StartIzin", start_izin))
     application.add_handler(CallbackQueryHandler(handle_izin, pattern="^izin_"))
     application.add_handler(CallbackQueryHandler(handle_done, pattern="^done_"))
-    application.add_handler(CommandHandler("listIzin", list_izin))
+    application.add_handler(CommandHandler("list", list_izin))
     application.add_handler(CommandHandler("test", test))
 
     await fetch_admins(application)
