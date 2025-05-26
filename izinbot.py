@@ -162,17 +162,22 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id_done = int(data.split("_")[1])
     if user.id != user_id_done:
-        await query.message.reply_text("❌ Tombol Done ini bukan untukmu!")
+        try:
+            owner = await context.bot.get_chat_member(update.effective_chat.id, user_id_done)
+            owner_name = owner.user.first_name
+        except Exception:
+            owner_name = "pengguna lain"
+
+        await query.message.reply_text(
+            f"❌ {user.first_name}, tombol Done ini bukan untukmu! (Ini tombol milik {owner_name})."
+        )
         return
 
     reason = user_reasons.pop(user.id, "tidak diketahui")
     if reason == "sebat":
         sebat_users[:] = [u for u in sebat_users if u["id"] == user.id]
 
-    # Ambil waktu kedaluwarsa dari dict
     expired_time = user_expired_times.pop(user.id, None)
-
-    # Coba cancel job jika masih ada
     job = active_users.pop(user.id, None)
     if job:
         job.schedule_removal()
