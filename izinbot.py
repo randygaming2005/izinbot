@@ -9,7 +9,6 @@ from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    ChatMemberAdministrator,
 )
 from telegram.ext import (
     ApplicationBuilder,
@@ -170,14 +169,25 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         job = active_users.pop(user.id)
+        scheduled_time = job.next_t.astimezone(timezone)
+        now = datetime.datetime.now(tz=timezone)
+        delta = now - scheduled_time
+
         job.schedule_removal()
         reason = user_reasons.pop(user.id, None)
         if reason == "sebat":
             sebat_users[:] = [u for u in sebat_users if u["id"] != user.id]
 
-        await query.message.reply_text(
-            f"✅ {user.first_name} sudah selesai izin {reason}."
-        )
+        if delta.total_seconds() > 0:
+            overtime_minutes = int(delta.total_seconds() // 60)
+            overtime_seconds = int(delta.total_seconds() % 60)
+            await query.message.reply_text(
+                f"⚠️ {user.first_name}, Anda melewati {overtime_minutes}m {overtime_seconds}s dari waktu yang ditentukan."
+            )
+        else:
+            await query.message.reply_text(
+                f"✅ {user.first_name} sudah selesai izin {reason}."
+            )
     else:
         await query.message.reply_text("❌ Callback tidak dikenali.")
 
