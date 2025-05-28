@@ -47,8 +47,12 @@ async def get_admin_ids(application, chat_id):
 def build_izin_keyboard():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("izin toilet ya ndan (5 menit)", callback_data="izin_toilet"),
-            InlineKeyboardButton("izin sebat ya ndan (10 menit)", callback_data="izin_sebat"),
+            InlineKeyboardButton("izin toilet (5 menit)", callback_data="izin_toilet_5"),
+            InlineKeyboardButton("izin toilet (15 menit)", callback_data="izin_toilet_15"),
+        ],
+        [
+            InlineKeyboardButton("izin sebat (10 menit)", callback_data="izin_sebat"),
+            InlineKeyboardButton("cancel", callback_data="izin_cancel"),
         ]
     ])
 
@@ -72,11 +76,27 @@ async def handle_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = user.id
     reason_map = {
-        "izin_toilet": ("toilet", 5),
+        "izin_toilet_5": ("toilet", 5),
+        "izin_toilet_15": ("toilet", 15),
         "izin_sebat": ("sebat", 10),
     }
 
     data = query.data
+
+    if data == "izin_cancel":
+        if user_id in active_users:
+            job = active_users.pop(user_id, None)
+            if job:
+                job.schedule_removal()
+            user_reasons.pop(user_id, None)
+            user_expired_times.pop(user_id, None)
+            if any(u["id"] == user_id for u in sebat_users):
+                sebat_users[:] = [u for u in sebat_users if u["id"] != user_id]
+            await query.message.reply_text("❌ Izin kamu telah dibatalkan.")
+        else:
+            await query.message.reply_text("❌ Kamu tidak memiliki izin aktif untuk dibatalkan.")
+        return
+
     if data not in reason_map:
         await query.message.reply_text("❌ Data izin tidak valid.")
         return
@@ -186,10 +206,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if expired_time:
         delay = now - expired_time
         if delay.total_seconds() > 0:
+            delay_minutes = int(delay.total_seconds() // 60)
+            delay_seconds = int(delay.total_seconds() % 60)
             await query.message.reply_text(
-                f"⚠️ {user.first_name}, kamu terlambat kembali selama "
-                f"{int(delay.total_seconds() // 60)}m {int(delay.total_seconds() % 60)}s."
+                f"⚠️ {user.first_name}, kamu terlambat kembali selama {delay_minutes}m {delay_seconds}s."
             )
+            admins = await get_admin_ids(context.application, update.effective_chat.id)
+            for admin_id in admins:
+                try:
+                    await context.bot.send_message(
+                        admin_id,
+                        f"{user.first_name}, Terlambat kembali selama {delay_minutes}m {delay_seconds}s."
+                    )
+                except Exception as e:
+                    logging.error(f"Gagal kirim pesan ke admin {admin_id}: {e}")
         else:
             await query.message.reply_text(
                 f"✅ {user.first_name} sudah selesai izin {reason}."
