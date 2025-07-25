@@ -83,6 +83,7 @@ async def handle_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     data = query.data
 
+    # Cancel existing izin
     if data == "izin_cancel":
         if user_id in active_users:
             job = active_users.pop(user_id, None)
@@ -90,19 +91,21 @@ async def handle_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 job.schedule_removal()
             user_reasons.pop(user_id, None)
             user_expired_times.pop(user_id, None)
-            if any(u["id"] == user_id for u in sebat_users):
-                sebat_users[:] = [u for u in sebat_users if u["id"] != user_id]
+            # Always remove from sebat_users if present
+            sebat_users[:] = [u for u in sebat_users if u["id"] != user_id]
             await query.message.reply_text("❌ Izin kamu telah dibatalkan.")
         else:
             await query.message.reply_text("❌ Kamu tidak memiliki izin aktif untuk dibatalkan.")
         return
 
+    # Invalid callback data
     if data not in reason_map:
         await query.message.reply_text("❌ Data izin tidak valid.")
         return
 
     reason, minutes = reason_map[data]
 
+    # Already has active izin
     if user_id in active_users:
         await query.message.reply_text(
             "⏳ Kamu masih punya izin aktif, silakan tekan Done dulu sebelum izin lagi.",
@@ -110,28 +113,34 @@ async def handle_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Handle 'sebat' reason limit
     if reason == "sebat":
         if any(u["id"] == user_id for u in sebat_users):
             await query.message.reply_text("⏳ Kamu sudah dalam izin sebat. Tekan Done dulu.")
             return
         if len(sebat_users) >= MAX_SEBAT:
             names = ", ".join([u["name"] for u in sebat_users])
-            await query.message.reply_text(f"🚫 silahkan kerjakan dahulu tugas mu, dan tunggu {names} kembali")
+            await query.message.reply_text(
+                f"🚫 silahkan kerjakan dahulu tugas mu, dan tunggu {names} kembali"
+            )
             return
         sebat_users.append({"id": user_id, "name": user.first_name})
 
+    # Record izin state
     user_reasons[user_id] = reason
 
     await query.message.reply_text(
         f"✅ {user.first_name} sudah izin {reason} selama {minutes} menit.\n"
-        f"Silakan tekan tombol Done setelah selesai.",
+        "Silakan tekan tombol Done setelah selesai.",
         reply_markup=build_done_keyboard(user_id),
         message_thread_id=thread_id,
     )
 
+    # Set expiration
     expiration = datetime.datetime.now(tz=timezone) + datetime.timedelta(minutes=minutes)
     user_expired_times[user_id] = expiration
 
+    # Schedule reminder job
     job = context.job_queue.run_once(
         reminder_timeout,
         when=minutes * 60,
@@ -147,23 +156,27 @@ async def reminder_timeout(context: ContextTypes.DEFAULT_TYPE):
     reason = data["reason"]
     thread_id = data.get("thread_id")
 
+    # Remove active state
     active_users.pop(user_id, None)
     if reason == "sebat":
         sebat_users[:] = [u for u in sebat_users if u["id"] != user_id]
 
+    # Fetch admin IDs
     admins = await get_admin_ids(context.application, chat_id)
     if not admins:
         logging.warning("Tidak dapat menemukan admin grup untuk kirim pesan.")
         return
 
+    # Fetch user's name
     try:
-        user = await context.bot.get_chat_member(chat_id, user_id)
-        name = user.user.first_name
+        member = await context.bot.get_chat_member(chat_id, user_id)
+        name = member.user.first_name
     except Exception:
         name = "Seseorang"
 
     msg = f"{name} belum kembali setelah izin {reason}."
 
+    # Notify admins
     for admin_id in admins:
         try:
             await context.bot.send_message(admin_id, msg)
@@ -193,9 +206,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    reason = user_reasons.pop(user.id, "tidak diketahui")
-    if reason == "sebat":
-        sebat_users[:] = [u for u in sebat_users if u["id"] == user.id]
+    # Pop reason and always remove from sebat_users
+    reason = user_reasons.pop(user.id, None)
+    sebat_users[:] = [u for u in sebat_users if u["id"] != user.id]
 
     expired_time = user_expired_times.pop(user.id, None)
     job = active_users.pop(user.id, None)
@@ -206,17 +219,17 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if expired_time:
         delay = now - expired_time
         if delay.total_seconds() > 0:
-            delay_minutes = int(delay.total_seconds() // 60)
-            delay_seconds = int(delay.total_seconds() % 60)
+            delay_min = int(delay.total_seconds() // 60)
+            delay_sec = int(delay.total_seconds() % 60)
             await query.message.reply_text(
-                f"⚠️ {user.first_name}, kamu terlambat kembali selama {delay_minutes}m {delay_seconds}s."
+                f"⚠️ {user.first_name}, kamu terlambat kembali selama {delay_min}m {delay_sec}s."
             )
             admins = await get_admin_ids(context.application, update.effective_chat.id)
             for admin_id in admins:
                 try:
                     await context.bot.send_message(
                         admin_id,
-                        f"{user.first_name}, Terlambat kembali selama {delay_minutes}m {delay_seconds}s."
+                        f"{user.first_name}, Terlambat kembali selama {delay_min}m {delay_sec}s."
                     )
                 except Exception as e:
                     logging.error(f"Gagal kirim pesan ke admin {admin_id}: {e}")
@@ -226,7 +239,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
     else:
         await query.message.reply_text(
-            f"✅ {user.first_name}, izin {reason} kamu sudah kedaluwarsa, tapi Done tetap diterima."
+            f"✅ {user.first_name}, izin {reason or 'tidak diketahui'} kamu sudah kedaluwarsa, tapi Done tetap diterima."
         )
 
 async def list_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -241,8 +254,8 @@ async def list_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         remaining = job.next_t - now
         minutes = int(remaining.total_seconds() // 60)
         seconds = int(remaining.total_seconds() % 60)
-        user = await context.bot.get_chat_member(update.effective_chat.id, user_id)
-        lines.append(f"- {user.user.first_name} ({reason}, sisa {minutes}m {seconds}s)")
+        member = await context.bot.get_chat_member(update.effective_chat.id, user_id)
+        lines.append(f"- {member.user.first_name} ({reason}, sisa {minutes}m {seconds}s)")
 
     await update.message.reply_text("\n".join(lines))
 
