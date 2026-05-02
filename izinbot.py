@@ -3,6 +3,7 @@ import os
 import asyncio
 import datetime
 import pytz
+import random
 
 from aiohttp import web
 from telegram import (
@@ -187,12 +188,15 @@ async def handle_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             daily_usage[today_key] = used_today + 1
             sisa = DEFAULT_SEBAT_LIMIT - (used_today + 1)
             sisa_jatah_msg = f"\n⚠️ Jatah sebat tersisa: <b>{sisa}</b> kali (Shift ini)."
+        else:
+            # PENYAMARAN JATAH VIP: Tampilkan 1 atau 2 agar terlihat sisa
+            jatah_palsu = random.randint(1, 2)
+            sisa_jatah_msg = f"\n⚠️ Jatah sebat tersisa: <b>{jatah_palsu}</b> kali (Shift ini)."
             
         sebat_users.append({"id": user_id, "name": user.first_name})
 
     user_reasons[user_id] = reason
 
-    # Pesan disamakan antara normal dan VIP (Mode Menyamar)
     reply_msg = (
         f"✅ <b>{user.first_name}</b> sudah izin <b>{reason}</b> selama {minutes} menit."
         f"{sisa_jatah_msg}\n\nSilakan tekan tombol <b>Done</b> di bawah ini setelah kembali bekerja."
@@ -219,7 +223,7 @@ async def handle_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pass
             sudah_kirim_reminder_rokok = True
 
-    # Pendaftaran Timer
+    # Set expired time untuk semuanya (agar VIP punya waktu mundur palsu di listizin)
     expiration = datetime.datetime.now(tz=timezone) + datetime.timedelta(minutes=minutes)
     user_expired_times[user_id] = expiration
 
@@ -232,7 +236,6 @@ async def handle_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         active_users[user_id] = job
     else:
-        # VIP tidak punya job beneran, tapi diberi status agar menyamar di listizin
         active_users[user_id] = "VIP"
 
 async def reminder_timeout(context: ContextTypes.DEFAULT_TYPE):
@@ -262,7 +265,7 @@ async def reminder_timeout(context: ContextTypes.DEFAULT_TYPE):
     for admin_id in admins:
         try:
             await context.bot.send_message(admin_id, msg)
-        except Exception as e:
+        except Exception:
             pass
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -309,13 +312,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             delay_min = int(delay.total_seconds() // 60)
             delay_sec = int(delay.total_seconds() % 60)
             
-            # Teks seolah-olah dimarahi karena telat (Penyamaran)
+            # Pura-pura dimarahi di grup agar terlihat normal
             await query.message.reply_text(
                 f"⚠️ <b>{user.first_name}</b> selesai izin {reason}, namun <b>terlambat kembali</b> selama {delay_min}m {delay_sec}s.",
                 parse_mode='HTML'
             )
             
-            # HANYA NORMAL USER YANG LAPORANNYA DIKIRIM KE ADMIN
+            # CEPU KE ADMIN: HANYA DIKIRIM JIKA BUKAN VIP
             if not is_vip:
                 admins = await get_admin_ids(context.application, update.effective_chat.id)
                 for admin_id in admins:
@@ -352,22 +355,16 @@ async def list_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             name = "Seseorang"
 
-        # Logika menyamar di listizin
-        if job == "VIP":
-            expired = user_expired_times.get(user_id, now)
-            remaining = expired - now
-            if remaining.total_seconds() > 0:
-                minutes = int(remaining.total_seconds() // 60)
-                seconds = int(remaining.total_seconds() % 60)
-            else:
-                minutes = 0
-                seconds = 0
-            lines.append(f"👤 <b>{name}</b> ({reason}) - Sisa waktu: {minutes}m {seconds}s")
-        else:
-            remaining = job.next_t - now
+        expired = user_expired_times.get(user_id, now)
+        remaining = expired - now
+        if remaining.total_seconds() > 0:
             minutes = int(remaining.total_seconds() // 60)
             seconds = int(remaining.total_seconds() % 60)
-            lines.append(f"👤 <b>{name}</b> ({reason}) - Sisa waktu: {minutes}m {seconds}s")
+        else:
+            minutes = 0
+            seconds = 0
+            
+        lines.append(f"👤 <b>{name}</b> ({reason}) - Sisa waktu: {minutes}m {seconds}s")
 
     await update.message.reply_text("\n".join(lines), parse_mode='HTML', message_thread_id=thread_id)
 
