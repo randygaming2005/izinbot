@@ -308,28 +308,30 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if expired_time:
         delay = now - expired_time
-        if delay.total_seconds() > 0:
+        
+        # LOGIKA BARU: Jika bukan VIP dan telat, maka tampilkan terlambat.
+        # Sebaliknya (jika VIP, ATAU jika user biasa tepat waktu), selalu tampilkan tepat waktu.
+        if delay.total_seconds() > 0 and not is_vip:
             delay_min = int(delay.total_seconds() // 60)
             delay_sec = int(delay.total_seconds() % 60)
             
-            # Pura-pura dimarahi di grup agar terlihat normal
             await query.message.reply_text(
                 f"⚠️ <b>{user.first_name}</b> selesai izin {reason}, namun <b>terlambat kembali</b> selama {delay_min}m {delay_sec}s.",
                 parse_mode='HTML'
             )
             
-            # CEPU KE ADMIN: HANYA DIKIRIM JIKA BUKAN VIP
-            if not is_vip:
-                admins = await get_admin_ids(context.application, update.effective_chat.id)
-                for admin_id in admins:
-                    try:
-                        await context.bot.send_message(
-                            admin_id,
-                            f"Laporan Keterlambatan: {user.first_name} terlambat kembali dari {reason} selama {delay_min}m {delay_sec}s."
-                        )
-                    except Exception:
-                        pass
+            # CEPU KE ADMIN HANYA UNTUK NON-VIP YANG TELAT
+            admins = await get_admin_ids(context.application, update.effective_chat.id)
+            for admin_id in admins:
+                try:
+                    await context.bot.send_message(
+                        admin_id,
+                        f"Laporan Keterlambatan: {user.first_name} terlambat kembali dari {reason} selama {delay_min}m {delay_sec}s."
+                    )
+                except Exception:
+                    pass
         else:
+            # VIP (Seberapa pun telatnya) dan User Normal yang tepat waktu akan masuk ke sini
             await query.message.reply_text(
                 f"✅ <b>{user.first_name}</b> telah selesai dari izin <b>{reason}</b> tepat waktu.",
                 parse_mode='HTML'
