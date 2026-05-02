@@ -29,25 +29,49 @@ WEBHOOK_URL = f"{WEBHOOK_URL_BASE}{WEBHOOK_PATH}" if WEBHOOK_URL_BASE else None
 
 timezone = pytz.timezone("Asia/Jakarta")
 
-# --- KONFIGURASI SPESIAL ---
+# --- KONFIGURASI SPESIAL & SHIFT ---
 OWNER_ID = 5043897152  # ID Owner VIP (Tanpa batas waktu, anti-cepu)
+
+EPOCH_DATE = datetime.date(2026, 3, 23)
+SHIFTS_ORDER = ["pagi", "malam", "siang"]
+RESET_TIMES = {"pagi": 7, "siang": 15, "malam": 23}  # Mengambil jam reset (Int)
 
 # --- STATE & DATABASE MEMORY ---
 active_users = {}       # {user_id: job atau "VIP"}
 user_reasons = {}       # {user_id: "reason"}
 user_expired_times = {} # {user_id: datetime}
 sebat_users = []        # [{"id": user_id, "name": name}]
-daily_usage = {}        # {"user_id_YYYY-MM-DD_sebat": count}
+daily_usage = {}        # {"user_id_YYYY-MM-DD_shift_sebat": count}
 
-DEFAULT_SEBAT_LIMIT = 3 # Jatah per orang per hari
+DEFAULT_SEBAT_LIMIT = 3 # Jatah per orang per shift
 sudah_kirim_reminder_rokok = False
 
 # --- HELPER FUNCTIONS ---
-def get_operational_date():
-    """Hari operasional baru dimulai jam 08:00 WIB"""
-    dt = datetime.datetime.now(tz=timezone)
-    shifted_dt = dt - datetime.timedelta(hours=8)
-    return shifted_dt.strftime('%Y-%m-%d')
+def get_shift_quota_key():
+    """Menentukan kunci kuota berdasarkan rotasi shift dan jam reset shift aktif"""
+    now = datetime.datetime.now(tz=timezone)
+    
+    # 1. Tentukan Shift Minggu Ini (Logika sama dengan script jadwal)
+    if now.hour < 7:
+        logical_now = now - datetime.timedelta(days=1)
+    else:
+        logical_now = now
+        
+    logical_date = logical_now.date()
+    days_diff = (logical_date - EPOCH_DATE).days
+    weeks_passed = days_diff // 7
+    current_shift = SHIFTS_ORDER[weeks_passed % 3]
+    
+    # 2. Tentukan Tanggal Kuota (Berdasarkan Jam Masuk/Reset Shift)
+    reset_hour = RESET_TIMES[current_shift]
+    
+    # Jika jam saat ini kurang dari jam reset shift aktif, anggap jatah kemarin
+    if now.hour < reset_hour:
+        effective_date = (now - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+    else:
+        effective_date = now.strftime('%Y-%m-%d')
+        
+    return f"{effective_date}_{current_shift}"
 
 async def get_admin_ids(application, chat_id):
     try:
@@ -58,7 +82,6 @@ async def get_admin_ids(application, chat_id):
         return []
 
 def build_izin_keyboard():
-    # Ditambahkan tombol Makan (15 Menit) sesuai script ke-2
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("🚽 Toilet (5 Menit)", callback_data="izin_toilet_5"),
@@ -81,8 +104,19 @@ def build_done_keyboard(user_id):
 # --- COMMAND HANDLERS ---
 async def startizin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     thread_id = update.message.message_thread_id
+    
+    # Ambil info shift aktif untuk ditampilkan
+    now = datetime.datetime.now(tz=timezone)
+    if now.hour < 7:
+        logical_date = (now - datetime.timedelta(days=1)).date()
+    else:
+        logical_date = now.date()
+    weeks_passed = (logical_date - EPOCH_DATE).days // 7
+    current_shift = SHIFTS_ORDER[weeks_passed % 3]
+    
     await update.message.reply_text(
-        "👋 Halo! Pilih tombol di bawah ini untuk memulai izin:\n",
+        f"👋 Halo! Saat ini berada di <b>Shift {current_shift.capitalize()}</b>.\nSilakan pilih izin:\n",
+        parse_mode='HTML',
         reply_markup=build_izin_keyboard(),
         message_thread_id=thread_id
     )
@@ -108,7 +142,6 @@ async def handle_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     data = query.data
 
-    # Membatalkan izin (Cancel)
     if data == "izin_cancel":
         if user_id in active_users:
             job = active_users.pop(user_id, None)
@@ -133,7 +166,6 @@ async def handle_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     reason, minutes = reason_map[data]
 
-    # Cek apakah masih ada izin aktif
     if user_id in active_users:
         await query.message.reply_text(
             "⏳ Kamu masih punya izin aktif, silakan tekan Done dulu sebelum izin lagi.",
@@ -142,32 +174,30 @@ async def handle_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     sisa_jatah_msg = ""
-    # Logika Limit Sebat
     if reason == "sebat":
         if any(u["id"] == user_id for u in sebat_users):
             await query.message.reply_text("⏳ Kamu sudah dalam izin sebat. Tekan Done dulu.")
             return
             
-        # Cek Jatah Harian (Owner VIP bebas jatah)
         if not is_vip:
-            today_key = f"{user_id}_{get_operational_date()}_sebat"
+            # Gunakan logika kunci kuota berdasarkan shift
+            shift_key = get_shift_quota_key()
+            today_key = f"{user_id}_{shift_key}_sebat"
             used_today = daily_usage.get(today_key, 0)
             
             if used_today >= DEFAULT_SEBAT_LIMIT:
                 await query.message.reply_text(
-                    f"❌ <b>IZIN DITOLAK:</b>\nJatah sebat/rokok kamu hari ini sudah habis ({used_today}/{DEFAULT_SEBAT_LIMIT}).",
+                    f"❌ <b>IZIN DITOLAK:</b>\nJatah sebat/rokok kamu di shift ini sudah habis ({used_today}/{DEFAULT_SEBAT_LIMIT}).",
                     parse_mode='HTML'
                 )
                 return
             
-            # Potong Jatah
             daily_usage[today_key] = used_today + 1
             sisa = DEFAULT_SEBAT_LIMIT - (used_today + 1)
-            sisa_jatah_msg = f"\n⚠️ Jatah sebat tersisa: <b>{sisa}</b> kali hari ini."
+            sisa_jatah_msg = f"\n⚠️ Jatah sebat tersisa: <b>{sisa}</b> kali (Shift ini)."
             
         sebat_users.append({"id": user_id, "name": user.first_name})
 
-    # Record izin state
     user_reasons[user_id] = reason
 
     if is_vip:
@@ -188,7 +218,6 @@ async def handle_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message_thread_id=thread_id
     )
 
-    # Broadcast Warning jika lebih dari 3 orang sebat (diambil dari script ke-2)
     if reason == "sebat":
         jumlah_sebat = len(sebat_users)
         if jumlah_sebat > 3 and not sudah_kirim_reminder_rokok:
@@ -203,7 +232,6 @@ async def handle_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pass
             sudah_kirim_reminder_rokok = True
 
-    # Penjadwalan Timer / Job Queue
     if not is_vip:
         expiration = datetime.datetime.now(tz=timezone) + datetime.timedelta(minutes=minutes)
         user_expired_times[user_id] = expiration
@@ -216,7 +244,6 @@ async def handle_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         active_users[user_id] = job
     else:
-        # VIP tidak punya masa kadaluarsa dan timer
         active_users[user_id] = "VIP"
         user_expired_times[user_id] = None
 
@@ -226,14 +253,12 @@ async def reminder_timeout(context: ContextTypes.DEFAULT_TYPE):
     user_id = data["user_id"]
     reason = data["reason"]
 
-    # Menghapus dari active state
     active_users.pop(user_id, None)
     if reason == "sebat":
         sebat_users[:] = [u for u in sebat_users if u["id"] != user_id]
 
     admins = await get_admin_ids(context.application, chat_id)
     if not admins:
-        logging.warning("Tidak dapat menemukan admin grup untuk kirim pesan.")
         return
 
     try:
@@ -313,7 +338,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         admin_id,
                         f"Laporan Keterlambatan: {user.first_name} terlambat kembali dari {reason} selama {delay_min}m {delay_sec}s."
                     )
-                except Exception as e:
+                except Exception:
                     pass
         else:
             await query.message.reply_text(
@@ -353,7 +378,7 @@ async def list_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- WEBHOOK & APP SERVER ---
 async def handle_root(request):
-    return web.Response(text="Bot is running smoothly.")
+    return web.Response(text="Bot Izin Berjalan Mulus.")
 
 async def handle_webhook(request):
     app = request.app["application"]
