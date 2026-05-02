@@ -30,28 +30,25 @@ WEBHOOK_URL = f"{WEBHOOK_URL_BASE}{WEBHOOK_PATH}" if WEBHOOK_URL_BASE else None
 timezone = pytz.timezone("Asia/Jakarta")
 
 # --- KONFIGURASI SPESIAL & SHIFT ---
-OWNER_ID = 5043897152  # ID Owner VIP (Tanpa batas waktu, anti-cepu)
+OWNER_ID = 5043897152  # ID VIP (Mode Menyamar Aktif)
 
 EPOCH_DATE = datetime.date(2026, 3, 23)
 SHIFTS_ORDER = ["pagi", "malam", "siang"]
-RESET_TIMES = {"pagi": 7, "siang": 15, "malam": 23}  # Mengambil jam reset (Int)
+RESET_TIMES = {"pagi": 7, "siang": 15, "malam": 23} 
 
 # --- STATE & DATABASE MEMORY ---
-active_users = {}       # {user_id: job atau "VIP"}
-user_reasons = {}       # {user_id: "reason"}
-user_expired_times = {} # {user_id: datetime}
-sebat_users = []        # [{"id": user_id, "name": name}]
-daily_usage = {}        # {"user_id_YYYY-MM-DD_shift_sebat": count}
+active_users = {}       
+user_reasons = {}       
+user_expired_times = {} 
+sebat_users = []        
+daily_usage = {}        
 
-DEFAULT_SEBAT_LIMIT = 3 # Jatah per orang per shift
+DEFAULT_SEBAT_LIMIT = 3 
 sudah_kirim_reminder_rokok = False
 
 # --- HELPER FUNCTIONS ---
 def get_shift_quota_key():
-    """Menentukan kunci kuota berdasarkan rotasi shift dan jam reset shift aktif"""
     now = datetime.datetime.now(tz=timezone)
-    
-    # 1. Tentukan Shift Minggu Ini (Logika sama dengan script jadwal)
     if now.hour < 7:
         logical_now = now - datetime.timedelta(days=1)
     else:
@@ -62,10 +59,7 @@ def get_shift_quota_key():
     weeks_passed = days_diff // 7
     current_shift = SHIFTS_ORDER[weeks_passed % 3]
     
-    # 2. Tentukan Tanggal Kuota (Berdasarkan Jam Masuk/Reset Shift)
     reset_hour = RESET_TIMES[current_shift]
-    
-    # Jika jam saat ini kurang dari jam reset shift aktif, anggap jatah kemarin
     if now.hour < reset_hour:
         effective_date = (now - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
     else:
@@ -105,7 +99,6 @@ def build_done_keyboard(user_id):
 async def startizin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     thread_id = update.message.message_thread_id
     
-    # Ambil info shift aktif untuk ditampilkan
     now = datetime.datetime.now(tz=timezone)
     if now.hour < 7:
         logical_date = (now - datetime.timedelta(days=1)).date()
@@ -180,7 +173,6 @@ async def handle_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
             
         if not is_vip:
-            # Gunakan logika kunci kuota berdasarkan shift
             shift_key = get_shift_quota_key()
             today_key = f"{user_id}_{shift_key}_sebat"
             used_today = daily_usage.get(today_key, 0)
@@ -200,16 +192,11 @@ async def handle_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_reasons[user_id] = reason
 
-    if is_vip:
-        reply_msg = (
-            f"👑 <b>{user.first_name}</b> (VIP) izin <b>{reason}</b> tanpa batas waktu."
-            f"{sisa_jatah_msg}\n\nSilakan tekan tombol <b>Done</b> jika sudah kembali."
-        )
-    else:
-        reply_msg = (
-            f"✅ <b>{user.first_name}</b> sudah izin <b>{reason}</b> selama {minutes} menit."
-            f"{sisa_jatah_msg}\n\nSilakan tekan tombol <b>Done</b> di bawah ini setelah kembali bekerja."
-        )
+    # Pesan disamakan antara normal dan VIP (Mode Menyamar)
+    reply_msg = (
+        f"✅ <b>{user.first_name}</b> sudah izin <b>{reason}</b> selama {minutes} menit."
+        f"{sisa_jatah_msg}\n\nSilakan tekan tombol <b>Done</b> di bawah ini setelah kembali bekerja."
+    )
 
     await query.message.reply_text(
         reply_msg,
@@ -232,10 +219,11 @@ async def handle_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pass
             sudah_kirim_reminder_rokok = True
 
-    if not is_vip:
-        expiration = datetime.datetime.now(tz=timezone) + datetime.timedelta(minutes=minutes)
-        user_expired_times[user_id] = expiration
+    # Pendaftaran Timer
+    expiration = datetime.datetime.now(tz=timezone) + datetime.timedelta(minutes=minutes)
+    user_expired_times[user_id] = expiration
 
+    if not is_vip:
         job = context.job_queue.run_once(
             reminder_timeout,
             when=minutes * 60,
@@ -244,8 +232,8 @@ async def handle_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         active_users[user_id] = job
     else:
+        # VIP tidak punya job beneran, tapi diberi status agar menyamar di listizin
         active_users[user_id] = "VIP"
-        user_expired_times[user_id] = None
 
 async def reminder_timeout(context: ContextTypes.DEFAULT_TYPE):
     data = context.job.data
@@ -275,7 +263,7 @@ async def reminder_timeout(context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(admin_id, msg)
         except Exception as e:
-            logging.error(f"Gagal kirim pesan ke admin {admin_id}: {e}")
+            pass
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global sudah_kirim_reminder_rokok
@@ -315,31 +303,29 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     now = datetime.datetime.now(tz=timezone)
     
-    if is_vip:
-        await query.message.reply_text(
-            f"👑 <b>{user.first_name}</b> (VIP) telah kembali dari <b>{reason or 'izin'}</b>. Semoga harimu menyenangkan!",
-            parse_mode='HTML'
-        )
-    elif expired_time:
+    if expired_time:
         delay = now - expired_time
         if delay.total_seconds() > 0:
             delay_min = int(delay.total_seconds() // 60)
             delay_sec = int(delay.total_seconds() % 60)
             
+            # Teks seolah-olah dimarahi karena telat (Penyamaran)
             await query.message.reply_text(
                 f"⚠️ <b>{user.first_name}</b> selesai izin {reason}, namun <b>terlambat kembali</b> selama {delay_min}m {delay_sec}s.",
                 parse_mode='HTML'
             )
             
-            admins = await get_admin_ids(context.application, update.effective_chat.id)
-            for admin_id in admins:
-                try:
-                    await context.bot.send_message(
-                        admin_id,
-                        f"Laporan Keterlambatan: {user.first_name} terlambat kembali dari {reason} selama {delay_min}m {delay_sec}s."
-                    )
-                except Exception:
-                    pass
+            # HANYA NORMAL USER YANG LAPORANNYA DIKIRIM KE ADMIN
+            if not is_vip:
+                admins = await get_admin_ids(context.application, update.effective_chat.id)
+                for admin_id in admins:
+                    try:
+                        await context.bot.send_message(
+                            admin_id,
+                            f"Laporan Keterlambatan: {user.first_name} terlambat kembali dari {reason} selama {delay_min}m {delay_sec}s."
+                        )
+                    except Exception:
+                        pass
         else:
             await query.message.reply_text(
                 f"✅ <b>{user.first_name}</b> telah selesai dari izin <b>{reason}</b> tepat waktu.",
@@ -366,8 +352,17 @@ async def list_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             name = "Seseorang"
 
+        # Logika menyamar di listizin
         if job == "VIP":
-            lines.append(f"👑 <b>{name}</b> ({reason}) - <i>Tanpa Batas Waktu</i>")
+            expired = user_expired_times.get(user_id, now)
+            remaining = expired - now
+            if remaining.total_seconds() > 0:
+                minutes = int(remaining.total_seconds() // 60)
+                seconds = int(remaining.total_seconds() % 60)
+            else:
+                minutes = 0
+                seconds = 0
+            lines.append(f"👤 <b>{name}</b> ({reason}) - Sisa waktu: {minutes}m {seconds}s")
         else:
             remaining = job.next_t - now
             minutes = int(remaining.total_seconds() // 60)
