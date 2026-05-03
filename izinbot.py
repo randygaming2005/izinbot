@@ -3,6 +3,7 @@ import os
 import asyncio
 import datetime
 import pytz
+import html  # Ditambahkan untuk menghindari error nama dengan karakter spesial
 
 from aiohttp import web
 from telegram import Update
@@ -61,7 +62,6 @@ def get_shift_quota_key():
     return f"{effective_date}_{current_shift}"
 
 def get_reason_icon(reason):
-    # Menambahkan ikon untuk ambil makan dan ambil minum
     icons = {"sebat": "🚬", "toilet": "🚽", "makan": "🍱", "ambil makan": "🍱", "ambil minum": "🥤"}
     return icons.get(reason, "ℹ️")
 
@@ -91,21 +91,19 @@ async def cmd_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Gabung semua argumen untuk membaca multi-kata seperti "ambil makan" atau "ambil minum"
     raw_reason = " ".join([a.lower() for a in context.args])
     
     minutes = 0
     reason = ""
 
-    # --- PEMISAHAN LOGIKA IZIN ---
     if raw_reason in ["sebat", "rokok"]:
         reason = "sebat"
         minutes = 10
     elif raw_reason == "makan":
         reason = "makan"
-        minutes = 15 # Silakan ubah angka ini jika durasi izin makan utama berbeda
+        minutes = 15
     elif raw_reason in ["ambil makan", "ambil minum"]:
-        reason = raw_reason # Menyimpan secara spesifik "ambil makan" atau "ambil minum"
+        reason = raw_reason
         minutes = 15
     elif raw_reason == "toilet":
         reason = "toilet"
@@ -137,13 +135,12 @@ async def cmd_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = datetime.datetime.now(tz=timezone)
     start_time_str = now.strftime("%H.%M")
     
-    # Menyesuaikan teks kapital untuk tampilan di pesan
     display_reason = "ROKOK" if reason == "sebat" else reason.upper()
+    safe_name = html.escape(user.first_name)
 
-    # --- FORMAT PESAN (IZIN DICATAT) ---
     reply_text = (
         f"⏳ <b>IZIN DICATAT:</b>\n\n"
-        f"Nama : <b>{user.first_name}</b>\n"
+        f"Nama : <b>{safe_name}</b>\n"
         f"Alasan : <b>{display_reason}</b>\n"
         f"Jam : <b>{start_time_str}</b>\n"
     )
@@ -200,15 +197,19 @@ async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Kamu tidak sedang dalam status izin.", parse_mode='HTML')
         return
 
-    session = active_sessions.pop(user.id)
+    # Ambil data HANYA untuk dibaca, JANGAN DIBUANG DULU DARI MEMORI
+    session = active_sessions[user.id]
     reason = session["reason"]
     expired_time = session["expire"]
     job = session["job"]
     start_time = session["start_time"]
-    was_penalized = session.get("penalized", False)
 
-    if job and job != "VIP":
-        job.schedule_removal()
+    # Gunakan try-except agar bot tidak mati/error jika berusaha menghapus timer yang sudah selesai/hangus
+    try:
+        if job and job != "VIP":
+            job.schedule_removal()
+    except Exception as e:
+        logging.warning(f"Job timer diabaikan (sudah hangus): {e}")
 
     now = datetime.datetime.now(tz=timezone)
     
@@ -223,20 +224,24 @@ async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Logika telat atau tidak
     is_late = expired_time and now > expired_time
+    safe_name = html.escape(user.first_name)
 
     if is_late:
         invoice_text = (
             f"❌ <b>IZIN TERLAMBAT:</b>\n"
-            f"{user.first_name} Sudah kembali dari {reason.upper()}!\n"
+            f"<b>{safe_name}</b> Sudah kembali dari {reason.upper()}!\n"
             f"Waktu Keluar : {dur_str}"
         )
     else:
         invoice_text = (
             f"✅ <b>IZIN SELESAI:</b>\n"
-            f"{user.first_name} Sudah kembali dari {reason.upper()}!\n"
+            f"<b>{safe_name}</b> Sudah kembali dari {reason.upper()}!\n"
             f"Waktu Keluar : {dur_str}"
         )
     
+    # HAPUS DATA SESI SETELAH SEMUANYA AMAN DIEKSEKUSI
+    del active_sessions[user.id]
+
     await update.message.reply_text(invoice_text, parse_mode='HTML')
 
 async def reminder_timeout(context: ContextTypes.DEFAULT_TYPE):
@@ -275,14 +280,22 @@ async def reminder_timeout(context: ContextTypes.DEFAULT_TYPE):
                     f"Sisa jatah: {max(0, sisa)}"
                 )
 
-        # Menggunakan direct mention @username agar push notification masuk dengan akurat
+        safe_name = html.escape(name)
+        
+        # --- PERBAIKAN TAG PETINGGI MENGGUNAKAN ID ---
+        tag_petinggi = (
+            f'<a href="tg://user?id=5043897152">@Intan_Payungggg</a> '
+            f'<a href="tg://user?id=7616244848">@oimar</a> '
+            f'<a href="tg://user?id=986211789">@cartenz88</a>'
+        )
+
         msg = (
-            f"⚠️ <a href=\"tg://user?id={user_id}\">{name}</a> belum kembali setelah batas waktu izin\n\n"
+            f"⚠️ <a href=\"tg://user?id={user_id}\">{safe_name}</a> belum kembali setelah batas waktu izin\n\n"
             f"Alasan: {reason.capitalize()}\n"
             f"Keluar sejak: {start_str}\n"
             f"Durasi sekarang: {dur_str}"
             f"{penalti_text}\n\n"
-            f"👀 @oimar @cartenz88"
+            f"👀 {tag_petinggi}"
         )
 
         try:
@@ -322,7 +335,7 @@ async def list_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 dm, ds = divmod(int(sisa.total_seconds()), 60)
                 timer_str = f"⏳ Sisa {dm}m {ds}s"
                 
-        res.append(f"{icon} <b>{name}</b> ({reason.upper()})\n   └ Keluar: {start} | {timer_str}\n")
+        res.append(f"{icon} <b>{html.escape(name)}</b> ({reason.upper()})\n   └ Keluar: {start} | {timer_str}\n")
         
     await update.message.reply_text("\n".join(res), parse_mode='HTML')
 
