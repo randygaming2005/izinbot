@@ -242,7 +242,15 @@ async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📊 Status  : <b>{status_text}</b>"
         f"{penalti_msg}{cc_admin}"
     )
-    await update.message.reply_text(invoice_text, parse_mode='HTML')
+    
+    # Mengirim invoice sebagai pesan baru karena komen /done sudah dihapus
+    thread_id = update.message.message_thread_id if update.message.is_topic_message else None
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=invoice_text,
+        parse_mode='HTML',
+        message_thread_id=thread_id
+    )
 
 async def reminder_timeout(context: ContextTypes.DEFAULT_TYPE):
     data = context.job.data
