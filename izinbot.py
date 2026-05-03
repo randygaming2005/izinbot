@@ -32,23 +32,12 @@ EPOCH_DATE = datetime.date(2026, 3, 23)
 SHIFTS_ORDER = ["pagi", "malam", "siang"]
 RESET_TIMES = {"pagi": 7, "siang": 15, "malam": 23}
 
-# Durasi Default (Menit)
-REASON_DEFAULTS = {
-    "toilet": 5,
-    "sebat": 10,
-    "rokok": 10,
-    "makan": 15,
-}
+DEFAULT_SEBAT_LIMIT = 3
+MAX_CONCURRENT_SEBAT = 3
 
 # --- STATE & DATABASE MEMORY ---
-active_users = {}       # {user_id: job_object atau "VIP"}
-user_reasons = {}       # {user_id: "reason"}
-user_expired_times = {} # {user_id: datetime}
-sebat_users = []        # [{"id": user_id, "name": name}]
-daily_usage = {}        # {"user_id_YYYY-MM-DD_shift_sebat": count}
-
-DEFAULT_SEBAT_LIMIT = 3
-sudah_kirim_reminder_rokok = False
+active_sessions = {}
+daily_usage = {}  # {"user_id_YYYY-MM-DD_shift_sebat": count}
 
 # --- HELPER FUNCTIONS ---
 def get_shift_quota_key():
@@ -71,168 +60,213 @@ def get_shift_quota_key():
         
     return f"{effective_date}_{current_shift}"
 
-async def get_top_admins_tag(context, chat_id):
-    try:
-        admins = await context.bot.get_chat_administrators(chat_id)
-        # Filter admin manusia & limit 3
-        human_admins = [a for a in admins if not a.user.is_bot]
-        top_3 = human_admins[:3]
-        return " ".join([f"<a href='tg://user?id={a.user.id}'>@{a.user.first_name}</a>" for a in top_3])
-    except Exception:
-        return "Admin"
+def get_reason_icon(reason):
+    icons = {"sebat": "🚬", "toilet": "🚽", "makan": "🍱"}
+    return icons.get(reason, "ℹ️")
 
 # --- COMMAND HANDLERS ---
 
 async def cmd_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global sudah_kirim_reminder_rokok
     user = update.effective_user
     chat_id = update.effective_chat.id
-    thread_id = update.message.message_thread_id
+    thread_id = update.message.message_thread_id if update.message.is_topic_message else None
     is_vip = (user.id == OWNER_ID)
+
+    if user.id in active_sessions:
+        await update.message.reply_text("⏳ <b>TOLAK:</b> Kamu masih memiliki izin aktif. Gunakan <b>/done</b> terlebih dahulu.", parse_mode='HTML')
+        return
 
     if not context.args:
         await update.message.reply_text(
-            "❌ <b>Format Salah!</b>\nGunakan: <code>/izin [alasan] [menit]</code>\nContoh: <code>/izin sebat</code> atau <code>/izin toilet 5</code>",
+            "❌ <b>Format Salah!</b>\nPilihan izin yang tersedia:\n"
+            "👉 <code>/izin sebat</code> (Otomatis 10 mnt)\n"
+            "👉 <code>/izin makan</code> (Otomatis 15 mnt)\n"
+            "👉 <code>/izin toilet 5</code> atau <code>/izin toilet 15</code>",
             parse_mode='HTML'
         )
         return
 
-    reason = context.args[0].lower()
+    args = [a.lower() for a in context.args]
+    raw_reason = args[0]
     
-    if len(context.args) > 1 and context.args[1].isdigit():
-        minutes = int(context.args[1])
-    else:
-        minutes = REASON_DEFAULTS.get(reason, 10)
+    # --- VALIDASI INPUT & DURASI ---
+    minutes = 0
+    reason = ""
 
-    if user.id in active_users:
-        await update.message.reply_text("⏳ Kamu masih memiliki izin aktif. Gunakan <b>/done</b> terlebih dahulu.", parse_mode='HTML')
+    if raw_reason in ["sebat", "rokok"]:
+        reason = "sebat"
+        minutes = 10
+    elif raw_reason == "makan":
+        reason = "makan"
+        minutes = 15
+    elif raw_reason == "toilet":
+        reason = "toilet"
+        if len(args) > 1 and args[1] in ["5", "15"]:
+            minutes = int(args[1])
+        elif len(args) > 1 and args[1] not in ["5", "15"]:
+            await update.message.reply_text("❌ <b>TOLAK:</b> Izin toilet hanya boleh <b>5</b> atau <b>15</b> menit.", parse_mode='HTML')
+            return
+        else:
+            minutes = 5 
+    else:
+        await update.message.reply_text("❌ <b>TOLAK:</b> Alasan tidak valid. Hanya boleh: <b>sebat, makan, toilet</b>.", parse_mode='HTML')
         return
 
     sisa_jatah_msg = ""
-    # Logika Khusus Sebat/Rokok (Berbagi Kuota)
-    if reason in ["sebat", "rokok"]:
+
+    # --- LOGIKA KHUSUS SEBAT ---
+    if reason == "sebat":
+        current_sebat_count = sum(1 for s in active_sessions.values() if s["reason"] == "sebat")
+        if current_sebat_count >= MAX_CONCURRENT_SEBAT and not is_vip:
+            await update.message.reply_text("⛔ <b>TOLAK:</b> Kuota sebat penuh! Sudah 3 orang di luar. Tunggu ada yang /done.", parse_mode='HTML')
+            return
+
         if not is_vip:
             shift_key = get_shift_quota_key()
             today_key = f"{user.id}_{shift_key}_sebat"
             used = daily_usage.get(today_key, 0)
             
             if used >= DEFAULT_SEBAT_LIMIT:
-                await update.message.reply_text(f"❌ <b>IZIN DITOLAK:</b>\nJatah merokok shift ini sudah habis ({used}/{DEFAULT_SEBAT_LIMIT}).", parse_mode='HTML')
+                await update.message.reply_text(f"❌ <b>TOLAK:</b> Jatah sebat shift ini sudah habis ({used}/{DEFAULT_SEBAT_LIMIT}).", parse_mode='HTML')
                 return
             
             daily_usage[today_key] = used + 1
             sisa = DEFAULT_SEBAT_LIMIT - (used + 1)
-            sisa_jatah_msg = f"\n⚠️ Jatah sisa: <b>{sisa}</b> kali."
-            
-        sebat_users.append({"id": user.id, "name": user.first_name})
+            sisa_jatah_msg = f"\n⚠️ Sisa jatah sebat shift ini: <b>{sisa}x</b>"
 
-    user_reasons[user.id] = reason
+    # --- EKSEKUSI IZIN ---
+    icon = get_reason_icon(reason)
+    now = datetime.datetime.now(tz=timezone)
     
     if is_vip:
-        active_users[user.id] = "VIP"
-        user_expired_times[user.id] = None
-        reply_text = f"👑 <b>{user.first_name}</b> (VIP) izin <b>{reason}</b>."
+        active_sessions[user.id] = {
+            "name": user.first_name,
+            "reason": reason,
+            "expire": None,
+            "job": "VIP"
+        }
+        reply_text = f"👑 <b>[VIP] {user.first_name}</b> izin {icon} <b>{reason.upper()}</b>."
     else:
-        expiration = datetime.datetime.now(tz=timezone) + datetime.timedelta(minutes=minutes)
-        user_expired_times[user.id] = expiration
+        expiration = now + datetime.timedelta(minutes=minutes)
         job = context.job_queue.run_once(
             reminder_timeout,
             when=minutes * 60,
-            data={"chat_id": chat_id, "user_id": user.id, "reason": reason, "thread_id": thread_id},
+            data={"chat_id": chat_id, "user_id": user.id, "thread_id": thread_id},
             name=f"reminder_{user.id}"
         )
-        active_users[user.id] = job
-        reply_text = f"✅ <b>{user.first_name}</b> izin <b>{reason}</b> selama {minutes} menit."
+        active_sessions[user.id] = {
+            "name": user.first_name,
+            "reason": reason,
+            "expire": expiration,
+            "job": job
+        }
+        reply_text = f"✅ <b>{user.first_name}</b> izin {icon} <b>{reason.upper()}</b> selama <b>{minutes} Menit</b>."
 
-    await update.message.reply_text(f"{reply_text}{sisa_jatah_msg}\n\nKetik <b>/done</b> jika sudah kembali.", parse_mode='HTML')
-
-    # Monitor jumlah orang merokok
-    if reason in ["sebat", "rokok"]:
-        if len(sebat_users) > 3 and not sudah_kirim_reminder_rokok:
-            msg_teguran = f"🚬 <b>PERINGATAN:</b> Sudah {len(sebat_users)} orang izin merokok!"
-            await context.bot.send_message(chat_id=chat_id, text=msg_teguran, parse_mode='HTML', message_thread_id=thread_id)
-            sudah_kirim_reminder_rokok = True
+    await update.message.reply_text(f"{reply_text}{sisa_jatah_msg}\n\n<i>Ketik /done jika sudah kembali.</i>", parse_mode='HTML')
 
 async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global sudah_kirim_reminder_rokok
     user = update.effective_user
     chat_id = update.effective_chat.id
     
-    if user.id not in active_users:
+    if user.id not in active_sessions:
+        await update.message.reply_text("Kamu tidak sedang dalam status izin.", parse_mode='HTML')
         return
 
-    reason = user_reasons.pop(user.id, None)
-    expired_time = user_expired_times.pop(user.id, None)
-    job = active_users.pop(user.id, None)
+    session = active_sessions.pop(user.id)
+    reason = session["reason"]
+    expired_time = session["expire"]
+    job = session["job"]
 
     if job and job != "VIP":
         job.schedule_removal()
 
-    if reason in ["sebat", "rokok"]:
-        global sebat_users
-        sebat_users = [u for u in sebat_users if u["id"] != user.id]
-        if len(sebat_users) <= 3:
-            sudah_kirim_reminder_rokok = False
-
     now = datetime.datetime.now(tz=timezone)
+    icon = get_reason_icon(reason)
     
-    # Cek Keterlambatan
+    # --- CEK KETERLAMBATAN & PENALTI ---
     if expired_time and now > expired_time:
         delay = now - expired_time
         dm, ds = divmod(int(delay.total_seconds()), 60)
         
-        # Ambil Tag Admin
-        admin_tags = await get_top_admins_tag(context, chat_id)
-        
         penalti_msg = ""
-        # Denda jatah jika sebat/rokok telat
-        if reason in ["sebat", "rokok"] and (user.id != OWNER_ID):
+        # Potong jatah sebat HANYA jika alasan izinnya sebat
+        if reason == "sebat" and user.id != OWNER_ID:
             shift_key = get_shift_quota_key()
             today_key = f"{user.id}_{shift_key}_sebat"
-            daily_usage[today_key] = daily_usage.get(today_key, 0) + 1
+            current_used = daily_usage.get(today_key, 0)
+            
+            daily_usage[today_key] = current_used + 1
             sisa = DEFAULT_SEBAT_LIMIT - daily_usage[today_key]
-            penalti_msg = f"\n🚫 <b>PENALTI:</b> Jatah dipotong 1. Sisa: <b>{max(0, sisa)}</b>"
+            penalti_msg = f"\n🚫 <b>PENALTI KETERLAMBATAN:</b> Jatah Sebat dipotong 1. Sisa: <b>{max(0, sisa)}x</b>"
 
         alert_text = (
             f"🚨 <b>ALERT KETERLAMBATAN</b> 🚨\n\n"
-            f"User: {user.mention_html()}\n"
-            f"Alasan: <b>{reason}</b>\n"
-            f"Terlambat: <b>{dm}m {ds}s</b>\n"
+            f"👤 {user.mention_html()} telah kembali dari {icon} <b>{reason.upper()}</b>\n"
+            f"⏰ Terlambat: <b>{dm}m {ds}s</b>"
             f"{penalti_msg}\n\n"
-            f"CC: {admin_tags}"
+            f"CC: @oimar @cartenz88"
         )
         await update.message.reply_text(alert_text, parse_mode='HTML')
     else:
-        await update.message.reply_text(f"✅ <b>{user.first_name}</b> kembali tepat waktu.", parse_mode='HTML')
+        await update.message.reply_text(f"✅ {icon} <b>{user.first_name}</b> kembali tepat waktu dari <b>{reason.upper()}</b>.", parse_mode='HTML')
 
 async def reminder_timeout(context: ContextTypes.DEFAULT_TYPE):
-    # Logika saat waktu habis (Reminder ke Admin)
     data = context.job.data
     user_id = data["user_id"]
-    reason = data["reason"]
-    active_users.pop(user_id, None)
+    chat_id = data["chat_id"]
+    thread_id = data.get("thread_id")
     
-    if reason in ["sebat", "rokok"]:
-        global sebat_users
-        sebat_users = [u for u in sebat_users if u["id"] != user_id]
+    if user_id in active_sessions:
+        session = active_sessions[user_id]
+        reason = session["reason"]
+        name = session["name"]
+        icon = get_reason_icon(reason)
 
-    try:
-        admins = await context.bot.get_chat_administrators(data["chat_id"])
-        msg = f"⚠️ <b>Peringatan:</b> User ID {user_id} belum /done setelah waktu {reason} habis!"
-        for admin in [a for a in admins if not a.user.is_bot]:
-            try: await context.bot.send_message(admin.user.id, msg, parse_mode='HTML')
-            except: pass
-    except: pass
+        msg = (
+            f"⚠️ <b>WAKTU HABIS!</b> ⚠️\n\n"
+            f"{icon} <b>{name}</b> belum kembali dari <b>{reason.upper()}</b>!\n"
+            f"Segera ketik /done jika sudah kembali ke posisi.\n\n"
+            f"CC Petinggi: @oimar @cartenz88"
+        )
+
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=msg,
+                parse_mode='HTML',
+                message_thread_id=thread_id
+            )
+        except Exception as e:
+            logging.error(f"Gagal mengirim pesan timeout: {e}")
 
 async def list_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not active_users:
-        await update.message.reply_text("✅ Tidak ada yang sedang izin.")
+    if not active_sessions:
+        await update.message.reply_text("✅ Tidak ada anggota yang sedang izin keluar.", parse_mode='HTML')
         return
     
-    res = ["📋 <b>Daftar Izin Aktif:</b>"]
-    for uid, status in active_users.items():
-        reason = user_reasons.get(uid, "izin")
-        res.append(f"- User {uid}: {reason}")
+    now = datetime.datetime.now(tz=timezone)
+    res = ["📋 <b>DAFTAR IZIN AKTIF:</b>\n"]
+    
+    for uid, data in active_sessions.items():
+        name = data["name"]
+        reason = data["reason"]
+        expire = data["expire"]
+        icon = get_reason_icon(reason)
+        
+        if expire is None: 
+            timer_str = "∞ (VIP)"
+        else:
+            if now > expire:
+                delay = now - expire
+                dm, ds = divmod(int(delay.total_seconds()), 60)
+                timer_str = f"❗️ TERLAMBAT {dm}m {ds}s"
+            else:
+                sisa = expire - now
+                dm, ds = divmod(int(sisa.total_seconds()), 60)
+                timer_str = f"⏳ Sisa {dm}m {ds}s"
+                
+        res.append(f"{icon} <b>{name}</b> - {reason.upper()} [{timer_str}]")
+        
     await update.message.reply_text("\n".join(res), parse_mode='HTML')
 
 # --- WEB SERVER (UNTUK DEPLOY) ---
@@ -246,12 +280,10 @@ async def handle_webhook(request):
 async def main():
     application = ApplicationBuilder().token(TOKEN).build()
 
-    # Handlers
     application.add_handler(CommandHandler(["izin", "Izin"], cmd_izin))
     application.add_handler(CommandHandler(["done", "Done"], cmd_done))
     application.add_handler(CommandHandler("listizin", list_izin))
 
-    # Server Setup
     app = web.Application()
     app["application"] = application
     app.add_routes([web.get("/", handle_root), web.post(WEBHOOK_PATH, handle_webhook)])
