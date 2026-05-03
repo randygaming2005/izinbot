@@ -34,6 +34,7 @@ RESET_TIMES = {"pagi": 7, "siang": 15, "malam": 23}
 
 DEFAULT_SEBAT_LIMIT = 3
 MAX_CONCURRENT_SEBAT = 3
+AUTO_CANCEL_MINUTES = 30 # Menit tambahan sebelum dihapus paksa
 
 # --- STATE & DATABASE MEMORY ---
 active_sessions = {}
@@ -70,7 +71,7 @@ async def cmd_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat_id = update.effective_chat.id
     thread_id = update.message.message_thread_id if update.message.is_topic_message else None
-    user_cmd_id = update.message.message_id  # Simpan ID pesan command user
+    user_cmd_id = update.message.message_id  
     is_vip = (user.id == OWNER_ID)
 
     if user.id in active_sessions:
@@ -148,18 +149,29 @@ async def cmd_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "reason": reason,
             "expire": None,
             "job": "VIP",
+            "job_autocancel": "VIP",
             "start_time": now,
             "bot_msg_id": sent_msg.message_id,
             "user_cmd_id": user_cmd_id
         }
     else:
         expiration = now + datetime.timedelta(minutes=minutes)
-        job = context.job_queue.run_once(
+        # Job untuk ngingetin waktu abis
+        job_reminder = context.job_queue.run_once(
             reminder_timeout,
             when=minutes * 60,
             data={"chat_id": chat_id, "user_id": user.id, "thread_id": thread_id},
             name=f"reminder_{user.id}"
         )
+        
+        # Job untuk hapus otomatis setelah 30 menit lewat dari waktu habis
+        job_autocancel = context.job_queue.run_once(
+            autocancel_timeout,
+            when=(minutes + AUTO_CANCEL_MINUTES) * 60,
+            data={"chat_id": chat_id, "user_id": user.id, "thread_id": thread_id},
+            name=f"autocancel_{user.id}"
+        )
+        
         reply_text = (
             f"⏳ <b>MENCATAT IZIN...</b>\n"
             f"👤 Nama : <b>{user.first_name}</b>\n"
@@ -172,7 +184,8 @@ async def cmd_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "name": user.first_name,
             "reason": reason,
             "expire": expiration,
-            "job": job,
+            "job": job_reminder,
+            "job_autocancel": job_autocancel,
             "start_time": now,
             "bot_msg_id": sent_msg.message_id,
             "user_cmd_id": user_cmd_id
@@ -191,20 +204,24 @@ async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reason = session["reason"]
     expired_time = session["expire"]
     job = session["job"]
+    job_autocancel = session.get("job_autocancel")
     start_time = session["start_time"]
     bot_msg_id = session["bot_msg_id"]
     user_cmd_id = session["user_cmd_id"]
 
+    # Matikan timer agar tidak bocor
     if job and job != "VIP":
         job.schedule_removal()
+    if job_autocancel and job_autocancel != "VIP":
+        job_autocancel.schedule_removal()
 
-    # --- PEMBERSIHAN CHAT (AUTO-DELETE) ---
+    # PEMBERSIHAN CHAT (AUTO-DELETE)
     try:
-        await context.bot.delete_message(chat_id=chat_id, message_id=bot_msg_id)  # Hapus respon izin bot
-        await context.bot.delete_message(chat_id=chat_id, message_id=user_cmd_id) # Hapus komen /izin
-        await context.bot.delete_message(chat_id=chat_id, message_id=done_cmd_id) # Hapus komen /done
+        await context.bot.delete_message(chat_id=chat_id, message_id=bot_msg_id) 
+        await context.bot.delete_message(chat_id=chat_id, message_id=user_cmd_id) 
+        await context.bot.delete_message(chat_id=chat_id, message_id=done_cmd_id)
     except Exception as e:
-        logging.warning(f"Gagal menghapus beberapa pesan (mungkin sudah dihapus manual): {e}")
+        logging.warning(f"Gagal menghapus beberapa pesan: {e}")
 
     now = datetime.datetime.now(tz=timezone)
     icon = get_reason_icon(reason)
@@ -212,7 +229,6 @@ async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     start_str = start_time.strftime("%H:%M")
     end_str = now.strftime("%H:%M")
     
-    # --- CEK KETERLAMBATAN & PENALTI ---
     status_text = "✅ Tepat Waktu"
     penalti_msg = ""
     cc_admin = ""
@@ -232,7 +248,6 @@ async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sisa = DEFAULT_SEBAT_LIMIT - daily_usage[today_key]
             penalti_msg = f"\n🚫 Penalti: <b>Jatah Sebat -1 (Sisa: {max(0, sisa)}x)</b>"
 
-    # --- INVOICE FINAL ---
     invoice_text = (
         f"🧾 <b>REKAP IZIN SELESAI</b>\n"
         f"👤 Nama    : <b>{user.first_name}</b>\n"
@@ -243,7 +258,6 @@ async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{penalti_msg}{cc_admin}"
     )
     
-    # Mengirim invoice sebagai pesan baru karena komen /done sudah dihapus
     thread_id = update.message.message_thread_id if update.message.is_topic_message else None
     await context.bot.send_message(
         chat_id=chat_id,
@@ -268,7 +282,7 @@ async def reminder_timeout(context: ContextTypes.DEFAULT_TYPE):
             f"⚠️ <b>WAKTU HABIS!</b> ⚠️\n"
             f"👤 Nama : <b>{name}</b>\n"
             f"{icon} Izin : <b>{reason.upper()}</b>\n\n"
-            f"<i>Segera ketik /done jika sudah kembali ke posisi.</i>\n"
+            f"<i>Segera ketik /done jika sudah kembali ke posisi. Jika tidak, izin akan dihapus dalam 30 menit!</i>\n"
             f"CC Petinggi: @oimar @cartenz88"
         )
 
@@ -281,6 +295,54 @@ async def reminder_timeout(context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception as e:
             logging.error(f"Gagal mengirim pesan timeout: {e}")
+
+# Fungsi baru untuk Auto Cancel
+async def autocancel_timeout(context: ContextTypes.DEFAULT_TYPE):
+    data = context.job.data
+    user_id = data["user_id"]
+    chat_id = data["chat_id"]
+    thread_id = data.get("thread_id")
+    
+    if user_id in active_sessions:
+        session = active_sessions.pop(user_id) # Otomatis melupakan user
+        reason = session["reason"]
+        name = session["name"]
+        bot_msg_id = session["bot_msg_id"]
+        user_cmd_id = session["user_cmd_id"]
+        
+        # Hapus pesan izin awal yang menggantung
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=bot_msg_id) 
+            await context.bot.delete_message(chat_id=chat_id, message_id=user_cmd_id) 
+        except Exception:
+            pass
+
+        penalti_msg = ""
+        # Terapkan penalti jika alasannya sebat
+        if reason == "sebat" and user_id != OWNER_ID:
+            shift_key = get_shift_quota_key()
+            today_key = f"{user_id}_{shift_key}_sebat"
+            current_used = daily_usage.get(today_key, 0)
+            daily_usage[today_key] = current_used + 1
+            sisa = DEFAULT_SEBAT_LIMIT - daily_usage[today_key]
+            penalti_msg = f"\n\n🚫 <b>PENALTI DITERAPKAN:</b>\nKarena lupa /done, jatah sebat dikurangi 1. (Sisa: <b>{max(0, sisa)}x</b>)"
+
+        msg = (
+            f"☠️ <b>IZIN DIHAPUS PAKSA!</b> ☠️\n"
+            f"👤 Nama : <b>{name}</b>\n"
+            f"Alasan: <b>Lupa ketik /done lebih dari 30 menit.</b>{penalti_msg}\n"
+            f"CC Petinggi: @oimar @cartenz88"
+        )
+
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=msg,
+                parse_mode='HTML',
+                message_thread_id=thread_id
+            )
+        except Exception as e:
+            logging.error(f"Gagal mengirim pesan auto cancel: {e}")
 
 async def list_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not active_sessions:
