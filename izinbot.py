@@ -61,7 +61,8 @@ def get_shift_quota_key():
     return f"{effective_date}_{current_shift}"
 
 def get_reason_icon(reason):
-    icons = {"sebat": "🚬", "toilet": "🚽", "makan": "🍱"}
+    # Menambahkan ikon untuk ambil makan dan ambil minum
+    icons = {"sebat": "🚬", "toilet": "🚽", "makan": "🍱", "ambil makan": "🍱", "ambil minum": "🥤"}
     return icons.get(reason, "ℹ️")
 
 # --- COMMAND HANDLERS ---
@@ -70,6 +71,7 @@ async def cmd_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat_id = update.effective_chat.id
     thread_id = update.message.message_thread_id if update.message.is_topic_message else None
+    
     user_cmd_id = update.message.message_id  
     is_vip = (user.id == OWNER_ID)
 
@@ -80,34 +82,42 @@ async def cmd_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
             "❌ <b>Format Salah!</b>\nPilihan izin:\n"
-            "👉 <code>/izin sebat</code>\n👉 <code>/izin makan</code>\n👉 <code>/izin toilet</code>",
+            "👉 <code>/izin sebat</code>\n"
+            "👉 <code>/izin makan</code>\n"
+            "👉 <code>/izin toilet</code>\n"
+            "👉 <code>/izin ambil makan</code>\n"
+            "👉 <code>/izin ambil minum</code>",
             parse_mode='HTML'
         )
         return
 
-    # Gabung semua argumen untuk membaca "ambil makan"
+    # Gabung semua argumen untuk membaca multi-kata seperti "ambil makan" atau "ambil minum"
     raw_reason = " ".join([a.lower() for a in context.args])
     
     minutes = 0
     reason = ""
 
+    # --- PEMISAHAN LOGIKA IZIN ---
     if raw_reason in ["sebat", "rokok"]:
         reason = "sebat"
         minutes = 10
-    elif raw_reason in ["makan", "ambil makan"]:
+    elif raw_reason == "makan":
         reason = "makan"
+        minutes = 15 # Silakan ubah angka ini jika durasi izin makan utama berbeda
+    elif raw_reason in ["ambil makan", "ambil minum"]:
+        reason = raw_reason # Menyimpan secara spesifik "ambil makan" atau "ambil minum"
         minutes = 15
     elif raw_reason == "toilet":
         reason = "toilet"
         minutes = 15
     else:
-        await update.message.reply_text("❌ <b>TOLAK:</b> Alasan tidak valid. (sebat/makan/toilet).", parse_mode='HTML')
+        await update.message.reply_text("❌ <b>TOLAK:</b> Alasan tidak valid. (sebat/makan/toilet/ambil makan/ambil minum).", parse_mode='HTML')
         return
 
-    sisa_jatah_msg = ""
+    sisa = 0
+    current_sebat_count = sum(1 for s in active_sessions.values() if s["reason"] == "sebat")
 
     if reason == "sebat":
-        current_sebat_count = sum(1 for s in active_sessions.values() if s["reason"] == "sebat")
         if current_sebat_count >= MAX_CONCURRENT_SEBAT and not is_vip:
             await update.message.reply_text("⛔ <b>TOLAK:</b> Kuota sebat penuh! Tunggu ada yang /done.", parse_mode='HTML')
             return
@@ -123,20 +133,36 @@ async def cmd_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             daily_usage[today_key] = used + 1
             sisa = DEFAULT_SEBAT_LIMIT - (used + 1)
-            sisa_jatah_msg = f"\n🎟 Sisa Jatah Sebat: <b>{sisa}x</b>"
 
-    icon = get_reason_icon(reason)
     now = datetime.datetime.now(tz=timezone)
+    start_time_str = now.strftime("%H.%M")
     
+    # Menyesuaikan teks kapital untuk tampilan di pesan
+    display_reason = "ROKOK" if reason == "sebat" else reason.upper()
+
+    # --- FORMAT PESAN (IZIN DICATAT) ---
+    reply_text = (
+        f"⏳ <b>IZIN DICATAT:</b>\n\n"
+        f"Nama : <b>{user.first_name}</b>\n"
+        f"Alasan : <b>{display_reason}</b>\n"
+        f"Jam : <b>{start_time_str}</b>\n"
+    )
+
+    if reason == "sebat":
+        if not is_vip:
+            reply_text += f"\nJatah Anda Sisa : <b>{sisa}</b>\n"
+        reply_text += f"Saat ini ada <b>{current_sebat_count + 1} ORANG</b> yang sedang merokok\n"
+
     if is_vip:
-        reply_text = (
-            f"👑 <b>MENCATAT IZIN... (VIP)</b>\n"
-            f"👤 Nama : <b>{user.first_name}</b>\n"
-            f"{icon} Izin : <b>{reason.upper()}</b>\n"
-            f"⏳ Waktu : <b>Tidak Terbatas</b>"
-        )
-        sent_msg = await update.message.reply_text(f"{reply_text}{sisa_jatah_msg}", parse_mode='HTML')
-        
+        reply_text += f"\n<i>(Waktu Bebas - VIP)</i>\n"
+    else:
+        reply_text += f"\n<i>(Waktu Izin: {minutes} Menit)</i>\n"
+
+    reply_text += "\n📩 Reply <b>/done</b> jika sudah kembali"
+
+    sent_msg = await update.message.reply_text(reply_text, parse_mode='HTML')
+
+    if is_vip:
         active_sessions[user.id] = {
             "name": user.first_name,
             "reason": reason,
@@ -156,14 +182,6 @@ async def cmd_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             name=f"reminder_{user.id}"
         )
         
-        reply_text = (
-            f"⏳ <b>MENCATAT IZIN...</b>\n"
-            f"👤 Nama : <b>{user.first_name}</b>\n"
-            f"{icon} Izin : <b>{reason.upper()}</b>\n"
-            f"⏱ Waktu : <b>{minutes} Menit</b>"
-        )
-        sent_msg = await update.message.reply_text(f"{reply_text}{sisa_jatah_msg}", parse_mode='HTML')
-
         active_sessions[user.id] = {
             "name": user.first_name,
             "reason": reason,
