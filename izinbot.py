@@ -151,12 +151,12 @@ async def cmd_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "job": "VIP",
             "job_autocancel": "VIP",
             "start_time": now,
+            "penalized": False,
             "bot_msg_id": sent_msg.message_id,
             "user_cmd_id": user_cmd_id
         }
     else:
         expiration = now + datetime.timedelta(minutes=minutes)
-        # Job untuk ngingetin waktu abis
         job_reminder = context.job_queue.run_once(
             reminder_timeout,
             when=minutes * 60,
@@ -164,7 +164,6 @@ async def cmd_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             name=f"reminder_{user.id}"
         )
         
-        # Job untuk hapus otomatis setelah 30 menit lewat dari waktu habis
         job_autocancel = context.job_queue.run_once(
             autocancel_timeout,
             when=(minutes + AUTO_CANCEL_MINUTES) * 60,
@@ -187,6 +186,7 @@ async def cmd_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "job": job_reminder,
             "job_autocancel": job_autocancel,
             "start_time": now,
+            "penalized": False,
             "bot_msg_id": sent_msg.message_id,
             "user_cmd_id": user_cmd_id
         }
@@ -204,8 +204,8 @@ async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     job = session["job"]
     job_autocancel = session.get("job_autocancel")
     start_time = session["start_time"]
+    was_penalized = session.get("penalized", False)
 
-    # Matikan timer agar tidak bocor
     if job and job != "VIP":
         job.schedule_removal()
     if job_autocancel and job_autocancel != "VIP":
@@ -213,7 +213,6 @@ async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     now = datetime.datetime.now(tz=timezone)
     
-    # Hitung durasi keluar
     total_seconds = int((now - start_time).total_seconds())
     dh, remainder = divmod(total_seconds, 3600)
     dm, ds = divmod(remainder, 60)
@@ -227,18 +226,15 @@ async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cc_admin = ""
 
     if expired_time and now > expired_time:
-        cc_admin = "\n\n⚠️ <i>Melewati batas waktu!</i>\nCC Petinggi: @oimar @cartenz88"
+        cc_admin = '\n\n⚠️ <i>Melewati batas waktu!</i>\n👀 <a href="tg://user?id=7616244848">@oimar</a> <a href="tg://user?id=986211789">@cartenz88</a>'
         
+        # Hanya tampilkan sisa, tidak usah kurangi lagi karena sudah dikurangi di reminder_timeout
         if reason == "sebat" and user.id != OWNER_ID:
             shift_key = get_shift_quota_key()
             today_key = f"{user.id}_{shift_key}_sebat"
-            current_used = daily_usage.get(today_key, 0)
-            
-            daily_usage[today_key] = current_used + 1
-            sisa = DEFAULT_SEBAT_LIMIT - daily_usage[today_key]
+            sisa = DEFAULT_SEBAT_LIMIT - daily_usage.get(today_key, 0)
             penalti_msg = f"\n🚫 Penalti: <b>Jatah Sebat -1 (Sisa: {max(0, sisa)}x)</b>"
 
-    # Format respon sesuai permintaan
     invoice_text = (
         f"✅ <b>IZIN SELESAI:</b>\n"
         f"<b>{user.first_name}</b> Sudah kembali dari <b>{reason.upper()}</b>!\n"
@@ -246,7 +242,6 @@ async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{penalti_msg}{cc_admin}"
     )
     
-    # Langsung me-reply pesan /done milik user
     await update.message.reply_text(invoice_text, parse_mode='HTML')
 
 async def reminder_timeout(context: ContextTypes.DEFAULT_TYPE):
@@ -259,14 +254,39 @@ async def reminder_timeout(context: ContextTypes.DEFAULT_TYPE):
         session = active_sessions[user_id]
         reason = session["reason"]
         name = session["name"]
-        icon = get_reason_icon(reason)
+        start_time = session["start_time"]
+        
+        now = datetime.datetime.now(tz=timezone)
+        start_str = start_time.strftime("%H:%M")
+        
+        total_seconds = int((now - start_time).total_seconds())
+        dm, ds = divmod(total_seconds, 60)
+        dur_str = f"{dm} Menit"
+        
+        penalti_text = ""
+        # Kurangi kuota langsung di sini jika dia sebat & bukan bos
+        if reason == "sebat" and user_id != OWNER_ID:
+            if not session.get("penalized"):
+                shift_key = get_shift_quota_key()
+                today_key = f"{user_id}_{shift_key}_sebat"
+                current_used = daily_usage.get(today_key, 0)
+                
+                daily_usage[today_key] = current_used + 1
+                sisa = DEFAULT_SEBAT_LIMIT - daily_usage[today_key]
+                session["penalized"] = True
+                
+                penalti_text = (
+                    f"\n\nPenalty : Jatah rokok dikurangi 1\n"
+                    f"Sisa jatah: {max(0, sisa)}"
+                )
 
         msg = (
-            f"⚠️ <b>WAKTU HABIS!</b> ⚠️\n"
-            f"👤 Nama : <b>{name}</b>\n"
-            f"{icon} Izin : <b>{reason.upper()}</b>\n\n"
-            f"<i>Segera ketik /done jika sudah kembali ke posisi. Jika tidak, izin akan dihapus dalam 30 menit!</i>\n"
-            f"CC Petinggi: @oimar @cartenz88"
+            f"⚠️ <a href=\"tg://user?id={user_id}\">{name}</a> belum kembali setelah batas waktu izin\n\n"
+            f"Alasan: {reason.capitalize()}\n"
+            f"Keluar sejak: {start_str}\n"
+            f"Durasi sekarang: {dur_str}"
+            f"{penalti_text}\n\n"
+            f"👀 <a href=\"tg://user?id=7616244848\">@oimar</a> <a href=\"tg://user?id=986211789\">@cartenz88</a>"
         )
 
         try:
@@ -286,25 +306,22 @@ async def autocancel_timeout(context: ContextTypes.DEFAULT_TYPE):
     thread_id = data.get("thread_id")
     
     if user_id in active_sessions:
-        session = active_sessions.pop(user_id) # Otomatis melupakan user
+        session = active_sessions.pop(user_id) 
         reason = session["reason"]
         name = session["name"]
 
         penalti_msg = ""
-        # Terapkan penalti jika alasannya sebat
         if reason == "sebat" and user_id != OWNER_ID:
             shift_key = get_shift_quota_key()
             today_key = f"{user_id}_{shift_key}_sebat"
-            current_used = daily_usage.get(today_key, 0)
-            daily_usage[today_key] = current_used + 1
-            sisa = DEFAULT_SEBAT_LIMIT - daily_usage[today_key]
-            penalti_msg = f"\n\n🚫 <b>PENALTI DITERAPKAN:</b>\nKarena lupa /done, jatah sebat dikurangi 1. (Sisa: <b>{max(0, sisa)}x</b>)"
+            sisa = DEFAULT_SEBAT_LIMIT - daily_usage.get(today_key, 0)
+            penalti_msg = f"\n\n🚫 <b>PENALTI SUDAH DITERAPKAN:</b>\nJatah sebat dikurangi 1. (Sisa: <b>{max(0, sisa)}x</b>)"
 
         msg = (
             f"☠️ <b>IZIN DIHAPUS PAKSA!</b> ☠️\n"
-            f"👤 Nama : <b>{name}</b>\n"
-            f"Alasan: <b>Lupa ketik /done lebih dari 30 menit.</b>{penalti_msg}\n"
-            f"CC Petinggi: @oimar @cartenz88"
+            f"👤 <a href=\"tg://user?id={user_id}\">{name}</a>\n"
+            f"Alasan: <b>Lupa ketik /done lebih dari 30 menit.</b>{penalti_msg}\n\n"
+            f"👀 <a href=\"tg://user?id=7616244848\">@oimar</a> <a href=\"tg://user?id=986211789\">@cartenz88</a>"
         )
 
         try:
