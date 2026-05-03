@@ -157,13 +157,15 @@ async def cmd_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         reply_text = (
-`📝 <b>IZIN DICATAT:</b>
+f"📝 <b>IZIN DICATAT:</b>
 
-Nama : <b>@${newPermit.username}</b>
-Alasan : <b>${reasonUpper}</b>
-Jam : <b>${formatTime(newPermit.startTime)}</b>${isRokok ? `\n\nJatah Anda Sisa : <b>${sisaJatahMsg}</b>\nSaat ini ada <b>${activeSmokersCount} ORANG</b> yang sedang merokok` : ''}
+f"Nama : <b>@${newPermit.username}</b>
+f"Alasan : <b>${reasonUpper}</b>
+f"Jam : <b>${formatTime(newPermit.startTime)}</b>${isRokok ? `\n\n
+f"Jatah Anda Sisa : <b>${sisaJatahMsg}</b>\n
+f"Saat ini ada <b>${activeSmokersCount} ORANG</b> yang sedang merokok` : ''}
 
-📩 Reply <b>/done</b> jika sudah kembali`;
+f"📩 Reply <b>/done</b> jika sudah kembali`;
 
       const replyOptions: any = { 
         parse_mode: 'HTML',
