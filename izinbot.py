@@ -70,6 +70,7 @@ async def cmd_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat_id = update.effective_chat.id
     thread_id = update.message.message_thread_id if update.message.is_topic_message else None
+    user_cmd_id = update.message.message_id  # Simpan ID pesan command user
     is_vip = (user.id == OWNER_ID)
 
     if user.id in active_sessions:
@@ -78,10 +79,8 @@ async def cmd_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not context.args:
         await update.message.reply_text(
-            "❌ <b>Format Salah!</b>\nPilihan izin yang tersedia:\n"
-            "👉 <code>/izin sebat</code> (Otomatis 10 mnt)\n"
-            "👉 <code>/izin makan</code> (Otomatis 15 mnt)\n"
-            "👉 <code>/izin toilet 5</code> atau <code>/izin toilet 15</code>",
+            "❌ <b>Format Salah!</b>\nPilihan izin:\n"
+            "👉 <code>/izin sebat</code>\n👉 <code>/izin makan</code>\n👉 <code>/izin toilet 5</code> (atau 15)",
             parse_mode='HTML'
         )
         return
@@ -89,7 +88,6 @@ async def cmd_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = [a.lower() for a in context.args]
     raw_reason = args[0]
     
-    # --- VALIDASI INPUT & DURASI ---
     minutes = 0
     reason = ""
 
@@ -109,16 +107,15 @@ async def cmd_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             minutes = 5 
     else:
-        await update.message.reply_text("❌ <b>TOLAK:</b> Alasan tidak valid. Hanya boleh: <b>sebat, makan, toilet</b>.", parse_mode='HTML')
+        await update.message.reply_text("❌ <b>TOLAK:</b> Alasan tidak valid. (sebat/makan/toilet).", parse_mode='HTML')
         return
 
     sisa_jatah_msg = ""
 
-    # --- LOGIKA KHUSUS SEBAT ---
     if reason == "sebat":
         current_sebat_count = sum(1 for s in active_sessions.values() if s["reason"] == "sebat")
         if current_sebat_count >= MAX_CONCURRENT_SEBAT and not is_vip:
-            await update.message.reply_text("⛔ <b>TOLAK:</b> Kuota sebat penuh! Sudah 3 orang di luar. Tunggu ada yang /done.", parse_mode='HTML')
+            await update.message.reply_text("⛔ <b>TOLAK:</b> Kuota sebat penuh! Tunggu ada yang /done.", parse_mode='HTML')
             return
 
         if not is_vip:
@@ -127,25 +124,34 @@ async def cmd_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             used = daily_usage.get(today_key, 0)
             
             if used >= DEFAULT_SEBAT_LIMIT:
-                await update.message.reply_text(f"❌ <b>TOLAK:</b> Jatah sebat shift ini sudah habis ({used}/{DEFAULT_SEBAT_LIMIT}).", parse_mode='HTML')
+                await update.message.reply_text(f"❌ <b>TOLAK:</b> Jatah sebat shift ini habis ({used}/{DEFAULT_SEBAT_LIMIT}).", parse_mode='HTML')
                 return
             
             daily_usage[today_key] = used + 1
             sisa = DEFAULT_SEBAT_LIMIT - (used + 1)
-            sisa_jatah_msg = f"\n⚠️ Sisa jatah sebat shift ini: <b>{sisa}x</b>"
+            sisa_jatah_msg = f"\n🎟 Sisa Jatah Sebat: <b>{sisa}x</b>"
 
-    # --- EKSEKUSI IZIN ---
     icon = get_reason_icon(reason)
     now = datetime.datetime.now(tz=timezone)
     
     if is_vip:
+        reply_text = (
+            f"👑 <b>MENCATAT IZIN... (VIP)</b>\n"
+            f"👤 Nama : <b>{user.first_name}</b>\n"
+            f"{icon} Izin : <b>{reason.upper()}</b>\n"
+            f"⏳ Waktu : <b>Tidak Terbatas</b>"
+        )
+        sent_msg = await update.message.reply_text(f"{reply_text}{sisa_jatah_msg}\n\n<i>Pesan ini otomatis dihapus saat /done.</i>", parse_mode='HTML')
+        
         active_sessions[user.id] = {
             "name": user.first_name,
             "reason": reason,
             "expire": None,
-            "job": "VIP"
+            "job": "VIP",
+            "start_time": now,
+            "bot_msg_id": sent_msg.message_id,
+            "user_cmd_id": user_cmd_id
         }
-        reply_text = f"👑 <b>[VIP] {user.first_name}</b> izin {icon} <b>{reason.upper()}</b>."
     else:
         expiration = now + datetime.timedelta(minutes=minutes)
         job = context.job_queue.run_once(
@@ -154,19 +160,28 @@ async def cmd_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             data={"chat_id": chat_id, "user_id": user.id, "thread_id": thread_id},
             name=f"reminder_{user.id}"
         )
+        reply_text = (
+            f"⏳ <b>MENCATAT IZIN...</b>\n"
+            f"👤 Nama : <b>{user.first_name}</b>\n"
+            f"{icon} Izin : <b>{reason.upper()}</b>\n"
+            f"⏱ Waktu : <b>{minutes} Menit</b>"
+        )
+        sent_msg = await update.message.reply_text(f"{reply_text}{sisa_jatah_msg}\n\n<i>Pesan ini otomatis dihapus saat /done.</i>", parse_mode='HTML')
+
         active_sessions[user.id] = {
             "name": user.first_name,
             "reason": reason,
             "expire": expiration,
-            "job": job
+            "job": job,
+            "start_time": now,
+            "bot_msg_id": sent_msg.message_id,
+            "user_cmd_id": user_cmd_id
         }
-        reply_text = f"✅ <b>{user.first_name}</b> izin {icon} <b>{reason.upper()}</b> selama <b>{minutes} Menit</b>."
-
-    await update.message.reply_text(f"{reply_text}{sisa_jatah_msg}\n\n<i>Ketik /done jika sudah kembali.</i>", parse_mode='HTML')
 
 async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat_id = update.effective_chat.id
+    done_cmd_id = update.message.message_id
     
     if user.id not in active_sessions:
         await update.message.reply_text("Kamu tidak sedang dalam status izin.", parse_mode='HTML')
@@ -176,20 +191,38 @@ async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reason = session["reason"]
     expired_time = session["expire"]
     job = session["job"]
+    start_time = session["start_time"]
+    bot_msg_id = session["bot_msg_id"]
+    user_cmd_id = session["user_cmd_id"]
 
     if job and job != "VIP":
         job.schedule_removal()
 
+    # --- PEMBERSIHAN CHAT (AUTO-DELETE) ---
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=bot_msg_id)  # Hapus respon izin bot
+        await context.bot.delete_message(chat_id=chat_id, message_id=user_cmd_id) # Hapus komen /izin
+        await context.bot.delete_message(chat_id=chat_id, message_id=done_cmd_id) # Hapus komen /done
+    except Exception as e:
+        logging.warning(f"Gagal menghapus beberapa pesan (mungkin sudah dihapus manual): {e}")
+
     now = datetime.datetime.now(tz=timezone)
     icon = get_reason_icon(reason)
     
+    start_str = start_time.strftime("%H:%M")
+    end_str = now.strftime("%H:%M")
+    
     # --- CEK KETERLAMBATAN & PENALTI ---
+    status_text = "✅ Tepat Waktu"
+    penalti_msg = ""
+    cc_admin = ""
+
     if expired_time and now > expired_time:
         delay = now - expired_time
         dm, ds = divmod(int(delay.total_seconds()), 60)
+        status_text = f"❌ Terlambat {dm}m {ds}s"
+        cc_admin = "\nCC Petinggi: @oimar @cartenz88"
         
-        penalti_msg = ""
-        # Potong jatah sebat HANYA jika alasan izinnya sebat
         if reason == "sebat" and user.id != OWNER_ID:
             shift_key = get_shift_quota_key()
             today_key = f"{user.id}_{shift_key}_sebat"
@@ -197,18 +230,19 @@ async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             daily_usage[today_key] = current_used + 1
             sisa = DEFAULT_SEBAT_LIMIT - daily_usage[today_key]
-            penalti_msg = f"\n🚫 <b>PENALTI KETERLAMBATAN:</b> Jatah Sebat dipotong 1. Sisa: <b>{max(0, sisa)}x</b>"
+            penalti_msg = f"\n🚫 Penalti: <b>Jatah Sebat -1 (Sisa: {max(0, sisa)}x)</b>"
 
-        alert_text = (
-            f"🚨 <b>ALERT KETERLAMBATAN</b> 🚨\n\n"
-            f"👤 {user.mention_html()} telah kembali dari {icon} <b>{reason.upper()}</b>\n"
-            f"⏰ Terlambat: <b>{dm}m {ds}s</b>"
-            f"{penalti_msg}\n\n"
-            f"CC: @oimar @cartenz88"
-        )
-        await update.message.reply_text(alert_text, parse_mode='HTML')
-    else:
-        await update.message.reply_text(f"✅ {icon} <b>{user.first_name}</b> kembali tepat waktu dari <b>{reason.upper()}</b>.", parse_mode='HTML')
+    # --- INVOICE FINAL ---
+    invoice_text = (
+        f"🧾 <b>REKAP IZIN SELESAI</b>\n"
+        f"👤 Nama    : <b>{user.first_name}</b>\n"
+        f"{icon} Izin    : <b>{reason.upper()}</b>\n"
+        f"📤 Keluar  : <b>{start_str}</b>\n"
+        f"📥 Kembali : <b>{end_str}</b>\n"
+        f"📊 Status  : <b>{status_text}</b>"
+        f"{penalti_msg}{cc_admin}"
+    )
+    await update.message.reply_text(invoice_text, parse_mode='HTML')
 
 async def reminder_timeout(context: ContextTypes.DEFAULT_TYPE):
     data = context.job.data
@@ -223,9 +257,10 @@ async def reminder_timeout(context: ContextTypes.DEFAULT_TYPE):
         icon = get_reason_icon(reason)
 
         msg = (
-            f"⚠️ <b>WAKTU HABIS!</b> ⚠️\n\n"
-            f"{icon} <b>{name}</b> belum kembali dari <b>{reason.upper()}</b>!\n"
-            f"Segera ketik /done jika sudah kembali ke posisi.\n\n"
+            f"⚠️ <b>WAKTU HABIS!</b> ⚠️\n"
+            f"👤 Nama : <b>{name}</b>\n"
+            f"{icon} Izin : <b>{reason.upper()}</b>\n\n"
+            f"<i>Segera ketik /done jika sudah kembali ke posisi.</i>\n"
             f"CC Petinggi: @oimar @cartenz88"
         )
 
@@ -251,6 +286,7 @@ async def list_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name = data["name"]
         reason = data["reason"]
         expire = data["expire"]
+        start = data["start_time"].strftime("%H:%M")
         icon = get_reason_icon(reason)
         
         if expire is None: 
@@ -259,13 +295,13 @@ async def list_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if now > expire:
                 delay = now - expire
                 dm, ds = divmod(int(delay.total_seconds()), 60)
-                timer_str = f"❗️ TERLAMBAT {dm}m {ds}s"
+                timer_str = f"❗️ TELAT {dm}m {ds}s"
             else:
                 sisa = expire - now
                 dm, ds = divmod(int(sisa.total_seconds()), 60)
                 timer_str = f"⏳ Sisa {dm}m {ds}s"
                 
-        res.append(f"{icon} <b>{name}</b> - {reason.upper()} [{timer_str}]")
+        res.append(f"{icon} <b>{name}</b> ({reason.upper()})\n   └ Keluar: {start} | {timer_str}\n")
         
     await update.message.reply_text("\n".join(res), parse_mode='HTML')
 
