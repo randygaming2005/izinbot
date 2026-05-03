@@ -101,7 +101,7 @@ async def cmd_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reason = "toilet"
         minutes = 15
     else:
-        await update.message.reply_text("❌ <b>IZIN DITOLAK:</b> Silahkan gunakan alasan yang valid. (sebat/makan/toilet).", parse_mode='HTML')
+        await update.message.reply_text("❌ <b>TOLAK:</b> Alasan tidak valid. (sebat/makan/toilet).", parse_mode='HTML')
         return
 
     sisa_jatah_msg = ""
@@ -109,7 +109,7 @@ async def cmd_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if reason == "sebat":
         current_sebat_count = sum(1 for s in active_sessions.values() if s["reason"] == "sebat")
         if current_sebat_count >= MAX_CONCURRENT_SEBAT and not is_vip:
-            await update.message.reply_text("⛔ <b>IZIN DITOLAK:</b> Kuota sebat penuh! Tunggu ada yang /done.", parse_mode='HTML')
+            await update.message.reply_text("⛔ <b>TOLAK:</b> Kuota sebat penuh! Tunggu ada yang /done.", parse_mode='HTML')
             return
 
         if not is_vip:
@@ -157,25 +157,23 @@ async def cmd_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         reply_text = (
-f"📝 <b>IZIN DICATAT:</b>
+            f"⏳ <b>MENCATAT IZIN...</b>\n"
+            f"👤 Nama : <b>{user.first_name}</b>\n"
+            f"{icon} Izin : <b>{reason.upper()}</b>\n"
+            f"⏱ Waktu : <b>{minutes} Menit</b>"
+        )
+        sent_msg = await update.message.reply_text(f"{reply_text}{sisa_jatah_msg}", parse_mode='HTML')
 
-f"Nama : <b>@${newPermit.username}</b>
-f"Alasan : <b>${reasonUpper}</b>
-f"Jam : <b>${formatTime(newPermit.startTime)}</b>${isRokok ? `\n\n
-f"Jatah Anda Sisa : <b>${sisaJatahMsg}</b>\n
-f"Saat ini ada <b>${activeSmokersCount} ORANG</b> yang sedang merokok` : ''}
-
-f"📩 Reply <b>/done</b> jika sudah kembali`;
-
-      const replyOptions: any = { 
-        parse_mode: 'HTML',
-        reply_to_message_id: ctx.message?.message_id 
-      };
-      if (threadId !== undefined) replyOptions.message_thread_id = threadId;
-
-      ctx.reply(replyMsg, replyOptions)
-         .catch(err => console.error("[BOT] Reply failed:", err));
-    };
+        active_sessions[user.id] = {
+            "name": user.first_name,
+            "reason": reason,
+            "expire": expiration,
+            "job": job_reminder,
+            "start_time": now,
+            "penalized": False,
+            "bot_msg_id": sent_msg.message_id,
+            "user_cmd_id": user_cmd_id
+        }
 
 async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
