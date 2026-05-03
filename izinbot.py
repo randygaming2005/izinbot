@@ -3,7 +3,6 @@ import os
 import asyncio
 import datetime
 import pytz
-import { supabase } from './supabase';
 
 from aiohttp import web
 from telegram import Update
