@@ -284,7 +284,6 @@ async def reminder_timeout(context: ContextTypes.DEFAULT_TYPE):
         
         # --- PERBAIKAN TAG PETINGGI MENGGUNAKAN ID ---
         tag_petinggi = (
-            f'<a href="tg://user?id=5043897152">@Intan_Payungggg</a> '
             f'<a href="tg://user?id=7616244848">@oimar</a> '
             f'<a href="tg://user?id=986211789">@cartenz88</a>'
         )
