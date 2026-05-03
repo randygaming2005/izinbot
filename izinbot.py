@@ -3,6 +3,7 @@ import os
 import asyncio
 import datetime
 import pytz
+import { supabase } from './supabase';
 
 from aiohttp import web
 from telegram import Update
@@ -39,6 +40,227 @@ AUTO_CANCEL_MINUTES = 30 # Menit tambahan sebelum dihapus paksa
 # --- STATE & DATABASE MEMORY ---
 active_sessions = {}
 daily_usage = {}  # {"user_id_YYYY-MM-DD_shift_sebat": count}
+
+  // Attempt to load from Supabase
+    try {
+        const { data, error } = await supabase.from('bot_config').select('config').eq('id', 1).single();
+        if (data && data.config) {
+            // Merge with current config to preserve any new fields added in code
+            config = { ...config, ...data.config };
+            console.log("[SUPABASE] Config loaded successfully. Bot Enabled:", config.botEnabled);
+            console.log("[SUPABASE] Loaded Brands:", config.brands.join(', '));
+            
+            // Prioritize token from config (set via UI)
+            if (config.botToken) {
+                currentToken = config.botToken;
+                console.log("[SUPABASE] Bot token loaded from config");
+            }
+        } else if (error) {
+            console.log("[SUPABASE] Config load error (might be empty):", error.message);
+        }
+    } catch (e) {
+        console.log("[SUPABASE] Config error:", e);
+    }
+
+    // --- TOKEN FALLBACKS ---
+    // If token not loaded from Supabase or is invalid, try local file
+    if ((!currentToken || currentToken.length < 10) && fs.existsSync(TOKEN_FILE_PATH)) {
+        try {
+            const data = JSON.parse(fs.readFileSync(TOKEN_FILE_PATH, 'utf-8'));
+            if (data.token && data.token.length > 10) {
+                currentToken = data.token;
+                console.log("[BOT] Token loaded from local file");
+            }
+        } catch (e) {
+            console.error("Error reading token file", e);
+        }
+    }
+
+    // Finally, fallback to environment variable (Highest priority if others are missing)
+    if ((!currentToken || currentToken.length < 10) && process.env.BOT_TOKEN) {
+        currentToken = process.env.BOT_TOKEN;
+        console.log("[ENV] Token loaded from environment variable (BOT_TOKEN)");
+        // Update config so it's persisted
+        config.botToken = currentToken;
+    }
+
+    if (!currentToken || currentToken.length < 10) {
+        console.warn("❌ CRITICAL: No valid Bot Token found in Supabase, Local JSON, or Environment Variables.");
+    }
+
+    console.log(`[BOT] Token status: ${currentToken && currentToken.length > 10 ? 'Configured (starts with ' + currentToken.substring(0, 5) + '...)' : 'Not Configured'}`);
+
+    // --- ENVIRONMENT OVERRIDES (Master Override) ---
+    // This allows the bot to recover IDs automatically from .env if they are set
+    if (process.env.GROUP_ID) {
+        config.groupId = process.env.GROUP_ID;
+        console.log(`[ENV] Group ID overridden from Environment: ${config.groupId}`);
+    }
+    if (process.env.ALERT_TOPIC_ID) {
+        config.alertTopicId = parseInt(process.env.ALERT_TOPIC_ID);
+        console.log(`[ENV] Alert Topic ID overridden from Environment: ${config.alertTopicId}`);
+    }
+    if (process.env.REPORT_TOPIC_ID) {
+        config.reportTopicId = parseInt(process.env.REPORT_TOPIC_ID);
+        console.log(`[ENV] Report Topic ID overridden from Environment: ${config.reportTopicId}`);
+    }
+
+    // Load Limits
+    if (fs.existsSync(LIMITS_FILE_PATH)) {
+        try {
+            userLimits = JSON.parse(fs.readFileSync(LIMITS_FILE_PATH, 'utf-8'));
+        } catch (e) {
+            console.error("Error reading limits file", e);
+        }
+    }
+    try {
+        const { data, error } = await supabase.from('bot_limits').select('limits').single();
+        if (data && data.limits) {
+            userLimits = data.limits;
+            console.log("[SUPABASE] Limits loaded successfully");
+        }
+    } catch (e) {
+        console.log("[SUPABASE] Limits table not found or error");
+    }
+
+    // Load Reports
+    let fileReports: BrandReport[] = [];
+    if (fs.existsSync(REPORTS_FILE_PATH)) {
+        try {
+            fileReports = JSON.parse(fs.readFileSync(REPORTS_FILE_PATH, 'utf-8'));
+            brandReports = fileReports;
+        } catch (e) {
+            console.error("Error reading reports file", e);
+        }
+    }
+    try {
+        const { data, error } = await supabase.from('bot_reports').select('reports').single();
+        if (data && data.reports && Array.isArray(data.reports)) {
+            // Only overwrite if Supabase has more or newer data, or if local is empty
+            if (data.reports.length >= brandReports.length) {
+                brandReports = data.reports;
+                console.log("[SUPABASE] Reports loaded successfully (Supabase preferred)");
+            } else {
+                console.log("[SUPABASE] Local reports are newer/larger, keeping local");
+            }
+        }
+        if (error) console.log("[SUPABASE] Reports table error:", error.message);
+    } catch (e: any) {
+        console.log("[SUPABASE] Reports load exception:", e.message);
+    }
+
+    // Load Permits
+    if (fs.existsSync(PERMITS_FILE_PATH)) {
+        try {
+            permits = JSON.parse(fs.readFileSync(PERMITS_FILE_PATH, 'utf-8'));
+        } catch (e) {
+            console.error("Error reading permits file", e);
+        }
+    }
+    try {
+        const { data, error } = await supabase.from('bot_permits').select('permits').single();
+        if (data && data.permits) {
+            permits = data.permits;
+            console.log("[SUPABASE] Permits loaded successfully");
+        }
+    } catch (e) {
+        console.log("[SUPABASE] Permits table not found or error");
+    }
+
+    // Load Usage
+    if (fs.existsSync(USAGE_FILE_PATH)) {
+        try {
+            dailyUsage = JSON.parse(fs.readFileSync(USAGE_FILE_PATH, 'utf-8'));
+        } catch (e) {
+            console.error("Error reading usage file", e);
+        }
+    }
+    try {
+        const { data, error } = await supabase.from('bot_usage').select('usage').single();
+        if (data && data.usage) {
+            dailyUsage = data.usage;
+            console.log("[SUPABASE] Usage loaded successfully");
+        }
+    } catch (e) {
+        console.log("[SUPABASE] Usage table not found or error");
+    }
+
+    loadLastPin();
+};
+
+// Call initial load
+export const init = async () => {
+    await loadInitialData();
+};
+
+// --- DATA PERSISTENCE ---
+const TOKEN_FILE_PATH = path.resolve('backend/token.json');
+
+const saveConfig = async () => {
+    try {
+        fs.writeFileSync(CONFIG_FILE_PATH, JSON.stringify(config, null, 2));
+        // Sync to Supabase
+        await supabase.from('bot_config').upsert({ id: 1, config: config, updated_at: new Date() });
+    } catch (e) {
+        console.error("Error saving config", e);
+    }
+};
+
+const saveLimits = async () => {
+    try {
+        fs.writeFileSync(LIMITS_FILE_PATH, JSON.stringify(userLimits, null, 2));
+        // Sync to Supabase
+        await supabase.from('bot_limits').upsert({ id: 1, limits: userLimits, updated_at: new Date() });
+    } catch (e) {
+        console.error("Error saving limits", e);
+    }
+};
+
+const saveReports = async () => {
+    try {
+        fs.writeFileSync(REPORTS_FILE_PATH, JSON.stringify(brandReports, null, 2));
+        // Sync to Supabase
+        const { error } = await supabase.from('bot_reports').upsert({ id: 1, reports: brandReports, updated_at: new Date() });
+        if (error) {
+            console.error("[SUPABASE] Error saving reports:", error.message);
+        } else {
+            console.log(`[SUPABASE] Reports synced successfully (${brandReports.length} items)`);
+        }
+    } catch (e) {
+        console.error("Error saving reports locally:", e);
+    }
+};
+
+const savePermits = async () => {
+    try {
+        fs.writeFileSync(PERMITS_FILE_PATH, JSON.stringify(permits, null, 2));
+        // Sync to Supabase
+        await supabase.from('bot_permits').upsert({ id: 1, permits: permits, updated_at: new Date() });
+    } catch (e) {
+        console.error("Error saving permits", e);
+    }
+};
+
+const saveUsage = async () => {
+    try {
+        fs.writeFileSync(USAGE_FILE_PATH, JSON.stringify(dailyUsage, null, 2));
+        // Sync to Supabase
+        await supabase.from('bot_usage').upsert({ id: 1, usage: dailyUsage, updated_at: new Date() });
+    } catch (e) {
+        console.error("Error saving usage", e);
+    }
+};
+
+let bot: Telegraf | null = null;
+let currentToken = '';
+let lastBotError: string | null = null;
+let retryCount = 0;
+let conflictCount = 0; // NEW: Track consecutive 409 conflicts
+const MAX_RETRIES = 15; // Increased retries
+let reconnectTimeout: NodeJS.Timeout | null = null;
+let watchdogInterval: NodeJS.Timeout | null = null;
+let isStarting = false;
+let isConflictDisabled = false; // NEW: Flag to stop auto-restart on conflict
 
 # --- HELPER FUNCTIONS ---
 def get_shift_quota_key():
