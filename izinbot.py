@@ -38,6 +38,7 @@ RESET_TIMES = {"pagi": 7, "siang": 15, "malam": 23}
 
 job_references = {} 
 
+# --- HELPER FUNCTIONS ---
 def get_bot_settings():
     default_settings = {
         "limit_sebat_shift": 3,
@@ -47,7 +48,7 @@ def get_bot_settings():
         "durasi_toilet": 15,
         "durasi_ambil_makan": 10,
         "max_orang_ambil_makan": 2,
-        "admin_tags": "@oimar"
+        "admin_tags": "@oimar @cartenz88"
     }
     try:
         res = supabase.table("bot_settings").select("*").eq("id", 1).execute()
@@ -64,8 +65,10 @@ def get_shift_quota_key():
     now = datetime.datetime.now(tz=timezone)
     if now.hour < 7: logical_now = now - datetime.timedelta(days=1)
     else: logical_now = now
+        
     logical_date = logical_now.date()
-    weeks_passed = (logical_date - EPOCH_DATE).days // 7
+    days_diff = (logical_date - EPOCH_DATE).days
+    weeks_passed = days_diff // 7
     current_shift = SHIFTS_ORDER[weeks_passed % 3]
     
     reset_hour = RESET_TIMES[current_shift]
@@ -77,6 +80,7 @@ def get_reason_icon(reason):
     icons = {"sebat": "🚬", "toilet": "🚽", "makan": "🍱", "ambil makan": "🍱", "ambil minum": "🥤"}
     return icons.get(reason, "ℹ️")
 
+# --- COMMAND HANDLERS ---
 async def cmd_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat_id = update.effective_chat.id
@@ -116,7 +120,6 @@ async def cmd_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sisa = 0
     now = datetime.datetime.now(tz=timezone)
     
-    # Hitung Antrean Saat Ini
     cek_semua_izin = supabase.table("izin_aktif").select("*").execute()
     current_sebat_count = sum(1 for row in cek_semua_izin.data if row["reason"] == "sebat")
     current_ambil_count = sum(1 for row in cek_semua_izin.data if row["reason"] in ["ambil makan", "ambil minum"])
@@ -131,12 +134,11 @@ async def cmd_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cek_kuota = supabase.table("daily_usage").select("used").eq("id", today_key).execute()
             used = cek_kuota.data[0]["used"] if len(cek_kuota.data) > 0 else 0
             if used >= settings["limit_sebat_shift"]:
-                await update.message.reply_text(f"❌ <b>TOLAK:</b> Jatah sebat habis ({used}/{settings['limit_sebat_shift']}).", parse_mode='HTML')
+                await update.message.reply_text(f"❌ <b>TOLAK:</b> Jatah sebat shift ini habis ({used}/{settings['limit_sebat_shift']}).", parse_mode='HTML')
                 return
             supabase.table("daily_usage").upsert({"id": today_key, "used": used + 1}).execute()
             sisa = settings["limit_sebat_shift"] - (used + 1)
-            
-    # Antrean Ambil Makan/Minum
+
     if reason in ["ambil makan", "ambil minum"] and not is_vip:
         if current_ambil_count >= settings["max_orang_ambil_makan"]:
             await update.message.reply_text(f"⛔ <b>TOLAK:</b> Maksimal {settings['max_orang_ambil_makan']} orang ambil makan/minum bersamaan!", parse_mode='HTML')
@@ -162,23 +164,31 @@ async def cmd_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_text += "\n📩 Reply <b>/done</b> jika sudah kembali"
     await update.message.reply_text(reply_text, parse_mode='HTML')
 
-    data_izin = {"user_id": user.id, "name": user.first_name, "reason": reason, "start_time": now.isoformat(), "expire_time": expiration_iso, "penalized": False}
+    data_izin = {
+        "user_id": user.id, "name": user.first_name, "reason": reason, 
+        "start_time": now.isoformat(), "expire_time": expiration_iso, "penalized": False
+    }
     supabase.table("izin_aktif").insert(data_izin).execute()
 
     if not is_vip:
-        job_reminder = context.job_queue.run_once(reminder_timeout, when=minutes * 60, data={"chat_id": chat_id, "user_id": user.id, "thread_id": thread_id}, name=f"reminder_{user.id}")
+        job_reminder = context.job_queue.run_once(
+            reminder_timeout, when=minutes * 60, 
+            data={"chat_id": chat_id, "user_id": user.id, "thread_id": thread_id}, name=f"reminder_{user.id}"
+        )
         job_references[user.id] = job_reminder
 
 async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     cek_aktif = supabase.table("izin_aktif").select("*").eq("user_id", user.id).execute()
+    
     if len(cek_aktif.data) == 0:
         await update.message.reply_text("Kamu tidak sedang dalam status izin.", parse_mode='HTML')
         return
 
     session = cek_aktif.data[0]
     reason = session["reason"]
-    start_time = datetime.datetime.fromisoformat(session["start_time"])
+    # PERBAIKAN ZONA WAKTU: Pastikan UTC dikonversi ke WIB sebelum diolah
+    start_time = datetime.datetime.fromisoformat(session["start_time"]).astimezone(timezone)
     expire_time_str = session.get("expire_time")
     
     if user.id in job_references:
@@ -196,14 +206,15 @@ async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     is_late = False
     if expire_time_str:
-        expire_time = datetime.datetime.fromisoformat(expire_time_str)
+        expire_time = datetime.datetime.fromisoformat(expire_time_str).astimezone(timezone)
         if now > expire_time: is_late = True
 
     if is_late: invoice_text = (f"❌ <b>IZIN TERLAMBAT:</b>\n<b>{safe_name}</b> Sudah kembali dari {reason.upper()}!\nWaktu Keluar : {dur_str}")
     else: invoice_text = (f"✅ <b>IZIN SELESAI:</b>\n<b>{safe_name}</b> Sudah kembali dari {reason.upper()}!\nWaktu Keluar : {dur_str}")
     
+    # PERBAIKAN: is_late sekarang dicatat agar panel Leaderboard Telat bekerja!
     data_riwayat = {
-        "user_id": session["user_id"], "name": session["name"], "reason": session["reason"], 
+        "user_id": session["user_id"], "name": session["name"], "reason": session["reason"],
         "start_time": session["start_time"], "end_time": now.isoformat(), "penalized": session["penalized"],
         "is_late": is_late
     }
@@ -224,10 +235,13 @@ async def reminder_timeout(context: ContextTypes.DEFAULT_TYPE):
         session = cek_aktif.data[0]
         reason = session["reason"]
         name = session["name"]
-        start_time = datetime.datetime.fromisoformat(session["start_time"])
         penalized = session["penalized"]
         now = datetime.datetime.now(tz=timezone)
-        start_str = start_time.strftime("%H:%M")
+        
+        # PERBAIKAN ZONA WAKTU: Ubah jam UTC database menjadi jam WIB
+        start_time = datetime.datetime.fromisoformat(session["start_time"]).astimezone(timezone)
+        start_str = start_time.strftime("%H:%M") # Akan menampilkan 07:30, bukan 00:30 lagi!
+        
         dm, ds = divmod(int((now - start_time).total_seconds()), 60)
         dur_str = f"{dm} Menit"
         penalti_text = ""
@@ -256,17 +270,22 @@ async def list_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(data_aktif) == 0:
         await update.message.reply_text("✅ Tidak ada anggota yang sedang izin keluar.", parse_mode='HTML')
         return
+    
     now = datetime.datetime.now(tz=timezone)
     res = ["📋 <b>DAFTAR IZIN AKTIF:</b>\n"]
+    
     for session in data_aktif:
         name, reason = session["name"], session["reason"]
-        start_time = datetime.datetime.fromisoformat(session["start_time"])
         expire_time_str = session.get("expire_time")
+        
+        # PERBAIKAN ZONA WAKTU
+        start_time = datetime.datetime.fromisoformat(session["start_time"]).astimezone(timezone)
         start_str = start_time.strftime("%H:%M")
+        
         icon = get_reason_icon(reason)
         if not expire_time_str: timer_str = "∞ (VIP)"
         else:
-            expire_time = datetime.datetime.fromisoformat(expire_time_str)
+            expire_time = datetime.datetime.fromisoformat(expire_time_str).astimezone(timezone)
             if now > expire_time:
                 dm, ds = divmod(int((now - expire_time).total_seconds()), 60)
                 timer_str = f"❗️ TELAT {dm}m {ds}s"
@@ -277,7 +296,7 @@ async def list_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(res), parse_mode='HTML')
 
 # --- WEB SERVER ---
-async def handle_root(request): return web.Response(text="Bot is Running dengan Supabase.")
+async def handle_root(request): return web.Response(text="Bot is Running dengan Supabase Zone Fix.")
 async def handle_webhook(request):
     app = request.app["application"]
     update = await request.json()
