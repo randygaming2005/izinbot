@@ -105,7 +105,7 @@ async def cmd_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not context.args:
-        await update.message.reply_text("❌ <b>Format Salah!</b>\Silahkan gunakan Pilihan Izin yang Benar", parse_mode='HTML')
+        await update.message.reply_text("❌ <b>Format Salah!</b>\nSilahkan gunakan Pilihan Izin yang Benar", parse_mode='HTML')
         return
 
     raw_reason = " ".join([a.lower() for a in context.args])
