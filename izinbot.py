@@ -47,6 +47,7 @@ def get_bot_settings():
         "durasi_makan": 15,
         "durasi_toilet": 15,
         "durasi_ambil_makan": 10,
+        "durasi_ibadah": 15,
         "max_orang_ambil_makan": 2,
         "admin_tags": "@oimar @cartenz88"
     }
@@ -60,6 +61,16 @@ def get_bot_settings():
     except Exception as e:
         logging.error(f"Gagal mengambil bot_settings. Error: {e}")
     return default_settings
+
+def get_user_extra_quota(user_id):
+    """Mengambil jatah manual tambahan dari tabel user_extra_quota"""
+    try:
+        res = supabase.table("user_extra_quota").select("extra_sebat").eq("user_id", user_id).execute()
+        if len(res.data) > 0:
+            return int(res.data[0].get("extra_sebat", 0))
+    except Exception as e:
+        logging.error(f"Gagal mengambil extra quota: {e}")
+    return 0
 
 def get_shift_quota_key():
     now = datetime.datetime.now(tz=timezone)
@@ -77,7 +88,7 @@ def get_shift_quota_key():
     return f"{effective_date}_{current_shift}"
 
 def get_reason_icon(reason):
-    icons = {"sebat": "🚬", "toilet": "🚽", "makan": "🍱", "ambil makan": "🍱", "ambil minum": "🥤"}
+    icons = {"sebat": "🚬", "toilet": "🚽", "makan": "🍱", "ambil makan": "🍱", "ambil minum": "🥤", "ibadah": "🕌"}
     return icons.get(reason, "ℹ️")
 
 # --- COMMAND HANDLERS ---
@@ -94,7 +105,7 @@ async def cmd_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not context.args:
-        await update.message.reply_text("❌ <b>Format Salah!</b>\nPilihan izin:\n👉 <code>/izin sebat</code>\n👉 <code>/izin makan</code>\n👉 <code>/izin toilet</code>\n👉 <code>/izin ambil makan</code>\n👉 <code>/izin ambil minum</code>", parse_mode='HTML')
+        await update.message.reply_text("❌ <b>Format Salah!</b>\Silahkan gunakan Pilihan Izin yang Benar", parse_mode='HTML')
         return
 
     raw_reason = " ".join([a.lower() for a in context.args])
@@ -113,6 +124,9 @@ async def cmd_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif raw_reason == "toilet":
         reason = "toilet"
         minutes = settings["durasi_toilet"]
+    elif raw_reason in ["sholat", "ibadah"]:
+        reason = "ibadah"
+        minutes = settings["durasi_ibadah"]
     else:
         await update.message.reply_text("❌ <b>TOLAK:</b> Alasan tidak valid.", parse_mode='HTML')
         return
@@ -131,13 +145,30 @@ async def cmd_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not is_vip:
             shift_key = get_shift_quota_key()
             today_key = f"{user.id}_{shift_key}_sebat"
+            hutang_key = f"{user.id}_hutang_sebat"
+            
+            # FITUR BARU: Hitung limit aktual (Limit Shift + Extra Quota dari Panel)
+            extra_quota = get_user_extra_quota(user.id)
+            actual_limit = settings["limit_sebat_shift"] + extra_quota
+            
             cek_kuota = supabase.table("daily_usage").select("used").eq("id", today_key).execute()
             used = cek_kuota.data[0]["used"] if len(cek_kuota.data) > 0 else 0
-            if used >= settings["limit_sebat_shift"]:
-                await update.message.reply_text(f"❌ <b>TOLAK:</b> Jatah sebat shift ini habis ({used}/{settings['limit_sebat_shift']}).", parse_mode='HTML')
+            
+            cek_hutang = supabase.table("daily_usage").select("used").eq("id", hutang_key).execute()
+            hutang = cek_hutang.data[0]["used"] if len(cek_hutang.data) > 0 else 0
+            
+            if hutang > 0:
+                used += hutang
+                supabase.table("daily_usage").upsert({"id": hutang_key, "used": 0}).execute()
+                supabase.table("daily_usage").upsert({"id": today_key, "used": used}).execute()
+
+            if used >= actual_limit:
+                pesan_tambahan = " (Termasuk potongan penalti!)" if hutang > 0 else ""
+                await update.message.reply_text(f"❌ <b>TOLAK:</b> Jatah sebat habis ({used}/{actual_limit}){pesan_tambahan}", parse_mode='HTML')
                 return
+                
             supabase.table("daily_usage").upsert({"id": today_key, "used": used + 1}).execute()
-            sisa = settings["limit_sebat_shift"] - (used + 1)
+            sisa = actual_limit - (used + 1)
 
     if reason in ["ambil makan", "ambil minum"] and not is_vip:
         if current_ambil_count >= settings["max_orang_ambil_makan"]:
@@ -187,7 +218,6 @@ async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     session = cek_aktif.data[0]
     reason = session["reason"]
-    # PERBAIKAN ZONA WAKTU: Pastikan UTC dikonversi ke WIB sebelum diolah
     start_time = datetime.datetime.fromisoformat(session["start_time"]).astimezone(timezone)
     expire_time_str = session.get("expire_time")
     
@@ -212,7 +242,6 @@ async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_late: invoice_text = (f"❌ <b>IZIN TERLAMBAT:</b>\n<b>{safe_name}</b> Sudah kembali dari {reason.upper()}!\nWaktu Keluar : {dur_str}")
     else: invoice_text = (f"✅ <b>IZIN SELESAI:</b>\n<b>{safe_name}</b> Sudah kembali dari {reason.upper()}!\nWaktu Keluar : {dur_str}")
     
-    # PERBAIKAN: is_late sekarang dicatat agar panel Leaderboard Telat bekerja!
     data_riwayat = {
         "user_id": session["user_id"], "name": session["name"], "reason": session["reason"],
         "start_time": session["start_time"], "end_time": now.isoformat(), "penalized": session["penalized"],
@@ -238,9 +267,8 @@ async def reminder_timeout(context: ContextTypes.DEFAULT_TYPE):
         penalized = session["penalized"]
         now = datetime.datetime.now(tz=timezone)
         
-        # PERBAIKAN ZONA WAKTU: Ubah jam UTC database menjadi jam WIB
         start_time = datetime.datetime.fromisoformat(session["start_time"]).astimezone(timezone)
-        start_str = start_time.strftime("%H:%M") # Akan menampilkan 07:30, bukan 00:30 lagi!
+        start_str = start_time.strftime("%H:%M") 
         
         dm, ds = divmod(int((now - start_time).total_seconds()), 60)
         dur_str = f"{dm} Menit"
@@ -250,13 +278,28 @@ async def reminder_timeout(context: ContextTypes.DEFAULT_TYPE):
         if reason == "sebat" and user_id != OWNER_ID and not penalized:
             shift_key = get_shift_quota_key()
             today_key = f"{user_id}_{shift_key}_sebat"
+            
+            # Dapatkan aktual limit termasuk extra quota
+            extra_quota = get_user_extra_quota(user_id)
+            actual_limit = settings["limit_sebat_shift"] + extra_quota
+
             cek_kuota = supabase.table("daily_usage").select("used").eq("id", today_key).execute()
             current_used = cek_kuota.data[0]["used"] if len(cek_kuota.data) > 0 else 0
-            new_used = current_used + 1
-            supabase.table("daily_usage").upsert({"id": today_key, "used": new_used}).execute()
+            
             supabase.table("izin_aktif").update({"penalized": True}).eq("user_id", user_id).execute()
-            sisa = max(0, settings["limit_sebat_shift"] - new_used)
-            penalti_text = f"\n\nPenalty : Jatah rokok dikurangi 1\nSisa jatah: {sisa}"
+            
+            if current_used >= actual_limit:
+                hutang_key = f"{user_id}_hutang_sebat"
+                cek_hutang = supabase.table("daily_usage").select("used").eq("id", hutang_key).execute()
+                current_hutang = cek_hutang.data[0]["used"] if len(cek_hutang.data) > 0 else 0
+                
+                supabase.table("daily_usage").upsert({"id": hutang_key, "used": current_hutang + 1}).execute()
+                penalti_text = "\n\n⚠️ <b>PENALTI:</b> Jatah shift ini sudah habis! Penalti -1 akan memotong jatah di shift berikutnya."
+            else:
+                new_used = current_used + 1
+                supabase.table("daily_usage").upsert({"id": today_key, "used": new_used}).execute()
+                sisa = max(0, actual_limit - new_used)
+                penalti_text = f"\n\n⚠️ <b>PENALTI:</b> Jatah rokok dikurangi 1\nSisa jatah saat ini: {sisa}"
 
         safe_name = html.escape(name)
         msg = (f"⚠️ <a href=\"tg://user?id={user_id}\">{safe_name}</a> belum kembali setelah batas waktu izin\n\n"
@@ -278,7 +321,6 @@ async def list_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name, reason = session["name"], session["reason"]
         expire_time_str = session.get("expire_time")
         
-        # PERBAIKAN ZONA WAKTU
         start_time = datetime.datetime.fromisoformat(session["start_time"]).astimezone(timezone)
         start_str = start_time.strftime("%H:%M")
         
@@ -296,7 +338,7 @@ async def list_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(res), parse_mode='HTML')
 
 # --- WEB SERVER ---
-async def handle_root(request): return web.Response(text="Bot is Running dengan Supabase Zone Fix.")
+async def handle_root(request): return web.Response(text="Bot is Running.")
 async def handle_webhook(request):
     app = request.app["application"]
     update = await request.json()
