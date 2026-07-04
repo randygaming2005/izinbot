@@ -147,28 +147,26 @@ async def cmd_izin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             today_key = f"{user.id}_{shift_key}_sebat"
             hutang_key = f"{user.id}_hutang_sebat"
             
-            # FITUR BARU: Hitung limit aktual (Limit Shift + Extra Quota dari Panel)
-            extra_quota = get_user_extra_quota(user.id)
-            actual_limit = settings["limit_sebat_shift"] + extra_quota
-            
             cek_kuota = supabase.table("daily_usage").select("used").eq("id", today_key).execute()
             used = cek_kuota.data[0]["used"] if len(cek_kuota.data) > 0 else 0
             
+            # FITUR BARU: Baca antrean penalti/bonus satu kali pakai
             cek_hutang = supabase.table("daily_usage").select("used").eq("id", hutang_key).execute()
             hutang = cek_hutang.data[0]["used"] if len(cek_hutang.data) > 0 else 0
             
-            if hutang > 0:
+            if hutang != 0: # <-- Sekarang mengecek semua hutang (baik penalti maupun bonus)
                 used += hutang
+                # Bot OTOMATIS meresetnya menjadi 0 setelah dibaca!
                 supabase.table("daily_usage").upsert({"id": hutang_key, "used": 0}).execute()
                 supabase.table("daily_usage").upsert({"id": today_key, "used": used}).execute()
 
-            if used >= actual_limit:
-                pesan_tambahan = " (Termasuk potongan penalti!)" if hutang > 0 else ""
-                await update.message.reply_text(f"❌ <b>TOLAK:</b> Jatah sebat habis ({used}/{actual_limit}){pesan_tambahan}", parse_mode='HTML')
+            if used >= settings["limit_sebat_shift"]:
+                pesan_tambahan = " (Termasuk penyesuaian manual dari Admin!)" if hutang != 0 else "."
+                await update.message.reply_text(f"❌ <b>TOLAK:</b> Jatah sebat shift ini habis ({used}/{settings['limit_sebat_shift']}){pesan_tambahan}", parse_mode='HTML')
                 return
                 
             supabase.table("daily_usage").upsert({"id": today_key, "used": used + 1}).execute()
-            sisa = actual_limit - (used + 1)
+            sisa = settings["limit_sebat_shift"] - (used + 1)
 
     if reason in ["ambil makan", "ambil minum"] and not is_vip:
         if current_ambil_count >= settings["max_orang_ambil_makan"]:
