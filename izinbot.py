@@ -358,7 +358,18 @@ async def main():
     await application.initialize()
     await application.start()
     await application.job_queue.start()
-    if WEBHOOK_URL: await application.bot.set_webhook(WEBHOOK_URL)
+    
+    # Fix: Tambah delay & retry saat set webhook
+    if WEBHOOK_URL:
+        for attempt in range(5):
+            try:
+                await application.bot.set_webhook(WEBHOOK_URL)
+                logging.info(f"Webhook berhasil di-set: {WEBHOOK_URL}")
+                break
+            except Exception as e:
+                logging.warning(f"Gagal set webhook (attempt {attempt+1}): {e}")
+                await asyncio.sleep(5)  # Tunggu 5 detik sebelum retry
+    
     while True: await asyncio.sleep(3600)
 
 if __name__ == "__main__": asyncio.run(main())
