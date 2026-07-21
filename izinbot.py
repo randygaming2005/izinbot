@@ -237,7 +237,36 @@ async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         expire_time = datetime.datetime.fromisoformat(expire_time_str).astimezone(timezone)
         if now > expire_time: is_late = True
 
-    if is_late: invoice_text = (f"❌ <b>IZIN TERLAMBAT:</b>\n<b>{safe_name}</b> Sudah kembali dari {reason.upper()}!\nWaktu Keluar : {dur_str}")
+    # --- TAMBAHAN FIX: PENALTI JIKA TIMER KEDULUAN /DONE ---
+    penalti_tambahan = ""
+    if is_late and reason == "sebat" and user.id != OWNER_ID and not session.get("penalized"):
+        settings = get_bot_settings()
+        shift_key = get_shift_quota_key()
+        today_key = f"{user.id}_{shift_key}_sebat"
+        
+        extra_quota = get_user_extra_quota(user.id)
+        actual_limit = settings["limit_sebat_shift"] + extra_quota
+
+        cek_kuota = supabase.table("daily_usage").select("used").eq("id", today_key).execute()
+        current_used = cek_kuota.data[0]["used"] if len(cek_kuota.data) > 0 else 0
+        
+        if current_used >= actual_limit:
+            hutang_key = f"{user.id}_hutang_sebat"
+            cek_hutang = supabase.table("daily_usage").select("used").eq("id", hutang_key).execute()
+            current_hutang = cek_hutang.data[0]["used"] if len(cek_hutang.data) > 0 else 0
+            
+            supabase.table("daily_usage").upsert({"id": hutang_key, "used": current_hutang + 1}).execute()
+            penalti_tambahan = "\n\n⚠️ <b>PENALTI:</b> Jatah shift ini sudah habis, masuk ke catatan hutang!"
+        else:
+            new_used = current_used + 1
+            supabase.table("daily_usage").upsert({"id": today_key, "used": new_used}).execute()
+            sisa = max(0, actual_limit - new_used)
+            penalti_tambahan = f"\n\n⚠️ <b>PENALTI:</b> Jatah rokok dikurangi 1. Sisa jatah: {sisa}"
+            
+        session["penalized"] = True # Update status agar riwayat database mencatat dia dipenalti
+
+    # --- INVOICE TEXT YANG SUDAH TERMASUK INFO PENALTI ---
+    if is_late: invoice_text = (f"❌ <b>IZIN TERLAMBAT:</b>\n<b>{safe_name}</b> Sudah kembali dari {reason.upper()}!\nWaktu Keluar : {dur_str}{penalti_tambahan}")
     else: invoice_text = (f"✅ <b>IZIN SELESAI:</b>\n<b>{safe_name}</b> Sudah kembali dari {reason.upper()}!\nWaktu Keluar : {dur_str}")
     
     data_riwayat = {
